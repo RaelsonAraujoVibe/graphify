@@ -1,0 +1,7 @@
+Type=Exe
+Form=Main.frm
+Module=Utilities; Utilities.bas
+Class=Customer; Customer.cls
+Reference=*\G{00020430-0000-0000-C000-000000000046}#2.0#0#stdole2.tlb#OLE Automation
+Startup="Main"
+Name="Sample"

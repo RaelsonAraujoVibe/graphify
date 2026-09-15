@@ -59,6 +59,7 @@ from graphify.extractors.sln import extract_sln  # noqa: F401
 from graphify.extractors.sql import extract_sql  # noqa: F401
 from graphify.extractors.terraform import extract_terraform  # noqa: F401
 from graphify.extractors.verilog import extract_verilog  # noqa: F401
+from graphify.extractors.vb6 import extract_vb6, extract_vb6_project  # noqa: F401
 from graphify.extractors.zig import extract_zig  # noqa: F401
 from graphify.security import sanitize_metadata
 from graphify.paths import disambiguate_ambiguous_candidates
@@ -5917,7 +5918,10 @@ _DISPATCH: dict[str, Any] = {
     ".cshtml": extract_razor,
     ".robot": extract_robot,
     ".resource": extract_robot,
-    ".cls": extract_apex,
+    ".bas": extract_vb6,
+    ".cls": extract_vb6,
+    ".frm": extract_vb6,
+    ".vbp": extract_vb6_project,
     ".trigger": extract_apex,
 }
 
@@ -6454,6 +6458,12 @@ def extract(
         bypass_cache = path.suffix in _JS_CACHE_BYPASS_SUFFIXES
         if not bypass_cache:
             cached = load_cached(path, root, cache_root=cache_location)
+            # This fork retargets .cls from Apex to VB6 without changing the
+            # upstream package version. Never replay old Apex cache entries.
+            if cached is not None and path.suffix.lower() == ".cls":
+                if not any(n.get("metadata", {}).get("language") == "vb6"
+                           for n in cached.get("nodes", [])):
+                    cached = None
             if cached is not None:
                 per_file[i] = cached
                 continue

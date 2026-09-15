@@ -1,3 +1,7 @@
+> **VB6 fork:** `.bas`, `.cls`, `.frm`, and `.vbp` indexing is available here.
+> See [the VB6 README](README-VB6.md) for installation, indexing another project,
+> supported syntax, and limitations. `.cls` is retargeted from Apex to VB6.
+
 <p align="center">
   <a href="https://graphify.com"><img src="https://raw.githubusercontent.com/Graphify-Labs/graphify/v8/docs/graphify-card.png" width="300" height="214" alt="Graphify"/></a>
 </p>
