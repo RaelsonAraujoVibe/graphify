@@ -25,13 +25,13 @@ fetch them. Until then, use the wheel distribution option below. Installing
 ## Install and index from your VB6 project
 
 Open a terminal in the VB6 project's root, where `requirements-graphify.txt`
-lives. Install Python 3.12 and Git first. The commands below create a dedicated
+lives. Install Python 3.11 and Git first. The commands below create a dedicated
 environment for indexing; pip installs Graphify and its declared dependencies.
 
 ### Windows (PowerShell)
 
 ```powershell
-py -3.12 -m venv .venv-graphify
+py -3.11 -m venv .venv-graphify
 .\.venv-graphify\Scripts\python.exe -m pip install -r requirements-graphify.txt
 .\.venv-graphify\Scripts\graphify.exe update .
 ```
@@ -39,7 +39,7 @@ py -3.12 -m venv .venv-graphify
 ### macOS / Linux
 
 ```sh
-python3.12 -m venv .venv-graphify
+python3.11 -m venv .venv-graphify
 .venv-graphify/bin/python -m pip install -r requirements-graphify.txt
 .venv-graphify/bin/graphify update .
 ```
@@ -49,7 +49,7 @@ python3.12 -m venv .venv-graphify
 From the same VB6 project directory, on Windows:
 
 ```powershell
-uv venv .venv-graphify --python 3.12
+uv venv .venv-graphify --python 3.11
 uv pip install --python .venv-graphify\Scripts\python.exe -r requirements-graphify.txt
 .\.venv-graphify\Scripts\graphify.exe update .
 ```
@@ -143,7 +143,7 @@ with the new extraction behavior.
 A maintainer can package this fork once, **from the Graphify source checkout**:
 
 ```powershell
-py -3.12 -m venv .venv-build
+py -3.11 -m venv .venv-build
 .\.venv-build\Scripts\python.exe -m pip install build
 .\.venv-build\Scripts\python.exe -m build --wheel
 ```
@@ -200,7 +200,7 @@ ANSI code page to UTF-8 before indexing.
 To work on this fork itself, from a Graphify checkout:
 
 ```powershell
-py -3.12 -m venv .venv
+py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e . pytest
 .\.venv\Scripts\graphify.exe update tests/fixtures/vb6
 .\.venv\Scripts\graphify.exe query 'Customer Save Validate' --graph tests/fixtures/vb6/graphify-out/graph.json
