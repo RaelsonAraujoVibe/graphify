@@ -24,13 +24,22 @@ _HTML_STALE_MARKER = ".graph.html.stale"
 # `_precompute_layout` falls back to `_grid_layout` instead — see that
 # function for why a cheap fallback beats leaving physics enabled.
 _LAYOUT_MAX_NODES = 1_200
-# Spread of the precomputed layout in vis-network canvas units. Both
-# spring_layout and _grid_layout return coordinates roughly within [-1, 1];
+# Spread of the organic (spring_layout) precomputed layout, in vis-network
+# canvas units. spring_layout returns coordinates roughly within [-1, 1];
 # this scale keeps spacing in the same rough order of magnitude vis-network's
 # own ForceAtlas2 physics used to produce (springLength=120 across thousands
 # of nodes), so the static layout doesn't look cramped or absurdly sparse
-# relative to node/label size.
+# relative to node/label size. `_grid_layout` does its own, size-aware
+# spacing instead of using this constant — see its docstring for why.
 _LAYOUT_SCALE = 800.0
+# Node radius is always in [10, 40] canvas px by construction — both size
+# formulas in to_html()'s node loop (`10 + 30 * deg/max_deg` and, for the
+# aggregated view, `10 + 30 * mc/max_mc`) are ratios against their own
+# maximum, so the single largest node in *any* graph is always exactly 40.
+# `_grid_layout` uses this ceiling — not the actual per-node size, which
+# would need a second pass — to size cells so that even two adjacent
+# maximum-size nodes never touch.
+_MAX_NODE_RADIUS = 40.0
 
 
 def _grid_layout(G: nx.Graph) -> dict:
@@ -49,16 +58,27 @@ def _grid_layout(G: nx.Graph) -> dict:
     filters panel stays fully usable, which is what actually matters once a
     graph is this large: finding and filtering specific nodes, not eyeballing
     an organic layout of tens of thousands of dots.
+
+    Unlike spring_layout, this returns *final* canvas-unit coordinates
+    directly (the caller must not re-apply `_LAYOUT_SCALE`) — cell spacing
+    is derived from `_MAX_NODE_RADIUS`, not a fixed total canvas size, so
+    the very first version of this fallback packed ~19.7k nodes (20-80px
+    diameter each) into an 11px cell spacing, guaranteeing massive overlap
+    regardless of node count. Spacing cells at the node-size ceiling instead
+    means the overall canvas grows with node count — a bigger graph needs
+    more panning to see edge to edge — rather than compressing everything
+    into the same fixed span no matter how many nodes it holds, in exchange
+    for every node actually being visible.
     """
     import math
     nodes = list(G.nodes())
     n = len(nodes)
+    cell = _MAX_NODE_RADIUS * 2.25  # diameter + a small margin, canvas px
     cols = max(1, math.ceil(math.sqrt(n)))
-    span = max(cols - 1, 1)
     positions = {}
     for i, node in enumerate(nodes):
         row, col = divmod(i, cols)
-        positions[node] = ((col / span) * 2 - 1, (row / span) * 2 - 1)
+        positions[node] = (col * cell, row * cell)
     return positions
 
 
@@ -78,13 +98,18 @@ def _precompute_layout(G: nx.Graph) -> dict | None:
     Returns None only for an empty graph, in which case there's nothing to
     lay out and the (harmless, since there are no nodes) physics-driven JS
     path runs instead.
+
+    Always returns *final* canvas-unit coordinates — `_LAYOUT_SCALE` is
+    applied here for the spring_layout branch; `_grid_layout` computes its
+    own final units directly. Callers must not scale the result further.
     """
     n = G.number_of_nodes()
     if n == 0:
         return None
     if n <= _LAYOUT_MAX_NODES:
         try:
-            return nx.spring_layout(G, seed=42)
+            raw = nx.spring_layout(G, seed=42)
+            return {node: (x * _LAYOUT_SCALE, y * _LAYOUT_SCALE) for node, (x, y) in raw.items()}
         except Exception:
             pass
     return _grid_layout(G)
@@ -940,9 +965,12 @@ def to_html(
             "degree": deg,
         }
         if positions is not None and node_id in positions:
+            # _precompute_layout already returns final canvas-unit coordinates
+            # (it applies _LAYOUT_SCALE itself for spring_layout; _grid_layout
+            # computes its own final units directly) — no scaling here.
             px, py = positions[node_id]
-            node["x"] = round(float(px) * _LAYOUT_SCALE, 1)
-            node["y"] = round(float(py) * _LAYOUT_SCALE, 1)
+            node["x"] = round(float(px), 1)
+            node["y"] = round(float(py), 1)
         # Conditional learning fields — only present for annotated nodes, so
         # un-annotated output keeps the exact pre-feature node dict shape.
         entry = learning_overlay.get(str(node_id)) if learning_overlay else None
