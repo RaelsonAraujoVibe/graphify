@@ -50,23 +50,38 @@ def _html_styles() -> str:
   .neighbor-link { display: block; padding: 2px 6px; margin: 2px 0; border-radius: 3px; cursor: pointer; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-left: 3px solid #333; }
   .neighbor-link:hover { background: #2a2a4e; }
   #neighbors-list { max-height: 160px; overflow-y: auto; margin-top: 4px; }
-  #legend-wrap { flex: 1; overflow-y: auto; padding: 12px; }
-  #legend-wrap h3 { font-size: 13px; color: #aaa; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
-  .legend-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; border-radius: 4px; font-size: 12px; }
-  .legend-item:hover { background: #2a2a4e; padding-left: 4px; }
-  .legend-item.dimmed { opacity: 0.35; }
-  .legend-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
-  .legend-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .legend-count { color: #666; font-size: 11px; }
   #stats { padding: 10px 14px; border-top: 1px solid #2a2a4e; font-size: 11px; color: #555; }
-  #legend-controls { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding: 4px 0; }
-  #legend-controls label { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; color: #aaa; user-select: none; }
-  #legend-controls label:hover { color: #e0e0e0; }
-  .legend-cb, #select-all-cb { appearance: none; -webkit-appearance: none; width: 14px; height: 14px; border: 1.5px solid #3a3a5e; border-radius: 3px; background: #0f0f1a; cursor: pointer; position: relative; flex-shrink: 0; }
-  .legend-cb:checked, #select-all-cb:checked { background: #4E79A7; border-color: #4E79A7; }
-  .legend-cb:checked::after, #select-all-cb:checked::after { content: ''; position: absolute; left: 3.5px; top: 1px; width: 4px; height: 7px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
-  #select-all-cb:indeterminate { background: #4E79A7; border-color: #4E79A7; }
-  #select-all-cb:indeterminate::after { content: ''; position: absolute; left: 2px; top: 5px; width: 8px; height: 2px; background: #fff; border: none; transform: none; }
+  #filters-wrap { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+  .filters-header { display: flex; align-items: center; justify-content: space-between; }
+  .filters-header h3 { font-size: 13px; color: #aaa; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 6px; }
+  .filters-badge { display: none; background: #4E79A7; color: #fff; border-radius: 9px; padding: 1px 6px; font-size: 10px; font-weight: 600; }
+  .filters-clear { background: none; border: none; color: #888; font-size: 11px; cursor: pointer; padding: 2px 4px; }
+  .filters-clear:hover { color: #e0e0e0; }
+  #facet-text-wrap { position: relative; }
+  #facet-text { width: 100%; background: #0f0f1a; border: 1px solid #3a3a5e; color: #e0e0e0; padding: 6px 9px; border-radius: 6px; font-size: 12px; outline: none; }
+  #facet-text:focus { border-color: #4E79A7; }
+  .facet-section { display: flex; flex-direction: column; gap: 4px; }
+  .facet-section-title { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: #aaa; text-transform: uppercase; letter-spacing: 0.05em; }
+  .facet-links button { background: none; border: none; color: #777; font-size: 10px; cursor: pointer; padding: 0 2px; }
+  .facet-links button:hover { color: #e0e0e0; }
+  .facet-list { max-height: 150px; overflow-y: auto; }
+  .facet-item { display: flex; align-items: center; gap: 6px; padding: 3px 2px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .facet-item:hover { background: #2a2a4e; }
+  .facet-item.inactive { opacity: 0.45; }
+  .facet-item.zero { opacity: 0.35; }
+  .facet-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .facet-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .facet-only { display: none; font-size: 10px; color: #888; padding: 0 4px; border-radius: 3px; }
+  .facet-item:hover .facet-only { display: inline; }
+  .facet-only:hover { color: #e0e0e0; background: #33335c; }
+  .facet-count { font-size: 11px; color: #666; flex-shrink: 0; }
+  .degree-inputs { display: flex; gap: 6px; }
+  .degree-inputs input { width: 100%; background: #0f0f1a; border: 1px solid #3a3a5e; color: #e0e0e0; padding: 4px 7px; border-radius: 5px; font-size: 12px; outline: none; }
+  .degree-inputs input:focus { border-color: #4E79A7; }
+  .toggle-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #ccc; cursor: pointer; user-select: none; }
+  .chk { appearance: none; -webkit-appearance: none; width: 14px; height: 14px; border: 1.5px solid #3a3a5e; border-radius: 3px; background: #0f0f1a; cursor: pointer; position: relative; flex-shrink: 0; }
+  .chk:checked { background: #4E79A7; border-color: #4E79A7; }
+  .chk:checked::after { content: ''; position: absolute; left: 3.5px; top: 1px; width: 4px; height: 7px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
 </style>"""
 
 def _hyperedge_script(hyperedges_json: str) -> str:
@@ -287,66 +302,254 @@ document.addEventListener('click', e => {{
     searchResults.style.display = 'none';
 }});
 
-const hiddenCommunities = new Set();
-
-const selectAllCb = document.getElementById('select-all-cb');
-
-function updateSelectAllState() {{
-  const total = LEGEND.length;
-  const hidden = hiddenCommunities.size;
-  selectAllCb.checked = hidden === 0;
-  selectAllCb.indeterminate = hidden > 0 && hidden < total;
+// ---------------------------------------------------------------------
+// Filters: facet-based node/edge visibility. Ported from the pattern used
+// by grafo-explorer's PainelFiltros (facets with live visible/total counts,
+// a degree range, and a text quick-filter) and reimplemented here in plain
+// JS, since this report is a single static HTML file with no build step.
+// Community facets are derived straight from RAW_NODES (community /
+// community_name / color are always present on every node) rather than
+// from LEGEND, which is only populated when the caller passes explicit
+// community_labels — deriving from RAW_NODES keeps the facet correct
+// (and non-empty) in the common unlabeled-community case too.
+// ---------------------------------------------------------------------
+function fmt(n) {{
+  return Number(n).toLocaleString('en-US');
 }}
 
-function toggleAllCommunities(hide) {{
-  document.querySelectorAll('.legend-item').forEach(item => {{
-    hide ? item.classList.add('dimmed') : item.classList.remove('dimmed');
+function distinctCounts(values) {{
+  const counts = new Map();
+  values.forEach(v => {{
+    const key = v == null || v === '' ? '' : String(v);
+    counts.set(key, (counts.get(key) || 0) + 1);
   }});
-  document.querySelectorAll('.legend-cb').forEach(cb => {{
-    cb.checked = !hide;
-  }});
-  LEGEND.forEach(c => {{
-    if (hide) hiddenCommunities.add(c.cid); else hiddenCommunities.delete(c.cid);
-  }});
-  const updates = RAW_NODES.map(n => ({{ id: n.id, hidden: hide }}));
-  nodesDS.update(updates);
-  updateSelectAllState();
+  return counts;
 }}
 
-const legendEl = document.getElementById('legend');
-LEGEND.forEach(c => {{
-  const item = document.createElement('div');
-  item.className = 'legend-item';
-  const cb = document.createElement('input');
-  cb.type = 'checkbox';
-  cb.className = 'legend-cb';
-  cb.checked = true;
-  cb.addEventListener('change', (e) => {{
-    e.stopPropagation();
-    if (cb.checked) {{
-      hiddenCommunities.delete(c.cid);
-      item.classList.remove('dimmed');
-    }} else {{
-      hiddenCommunities.add(c.cid);
-      item.classList.add('dimmed');
-    }}
-    const updates = RAW_NODES
-      .filter(n => n.community === c.cid)
-      .map(n => ({{ id: n.id, hidden: !cb.checked }}));
-    nodesDS.update(updates);
-    updateSelectAllState();
-  }});
-  item.innerHTML = `<div class="legend-dot" style="background:${{c.color}}"></div>
-    <span class="legend-label">${{c.label}}</span>
-    <span class="legend-count">${{c.count}}</span>`;
-  item.prepend(cb);
-  item.onclick = (e) => {{
-    if (e.target === cb) return;
-    cb.checked = !cb.checked;
-    cb.dispatchEvent(new Event('change'));
-  }};
-  legendEl.appendChild(item);
+const maxDegree = RAW_NODES.reduce((m, n) => Math.max(m, n.degree || 0), 0);
+
+const communityFacetMap = new Map();
+RAW_NODES.forEach(n => {{
+  const cid = String(n.community);
+  if (!communityFacetMap.has(cid)) {{
+    communityFacetMap.set(cid, {{
+      value: cid,
+      label: n.community_name || `Community ${{cid}}`,
+      color: n.color && n.color.background,
+      total: 0,
+    }});
+  }}
+  communityFacetMap.get(cid).total += 1;
 }});
+
+function facetItemsFrom(counts, emptyLabel) {{
+  return [...counts.entries()]
+    .map(([value, total]) => ({{ value, label: value || emptyLabel, total }}))
+    .sort((a, b) => b.total - a.total);
+}}
+
+const FACETS = [
+  {{
+    key: 'fileType', title: 'Node type', appliesTo: 'node',
+    items: facetItemsFrom(distinctCounts(RAW_NODES.map(n => n.file_type)), '(unknown)'),
+    read: n => n.file_type == null ? '' : String(n.file_type),
+  }},
+  {{
+    key: 'community', title: 'Community', appliesTo: 'node',
+    items: [...communityFacetMap.values()].sort((a, b) => b.total - a.total),
+    read: n => String(n.community),
+  }},
+  {{
+    key: 'relation', title: 'Relation', appliesTo: 'edge',
+    items: facetItemsFrom(distinctCounts(RAW_EDGES.map(e => e.label)), '(unlabeled)'),
+    read: e => e.label == null ? '' : String(e.label),
+  }},
+  {{
+    key: 'confidence', title: 'Confidence', appliesTo: 'edge',
+    items: facetItemsFrom(distinctCounts(RAW_EDGES.map(e => e.confidence)), '(unset)'),
+    read: e => e.confidence == null ? '' : String(e.confidence),
+  }},
+];
+
+const filters = {{ text: '', degreeMin: 0, degreeMax: maxDegree, hideIsolated: false, active: {{}} }};
+FACETS.forEach(f => {{ filters.active[f.key] = new Set(f.items.map(it => it.value)); }});
+
+function normalize(s) {{
+  return String(s ?? '').toLowerCase();
+}}
+
+function computeVisible() {{
+  const term = normalize(filters.text).trim();
+  const visibleNodes = new Set();
+  RAW_NODES.forEach(n => {{
+    for (const f of FACETS) {{
+      if (f.appliesTo !== 'node' || !f.items.length) continue;
+      if (!filters.active[f.key].has(f.read(n))) return;
+    }}
+    const deg = n.degree || 0;
+    if (deg < filters.degreeMin || deg > filters.degreeMax) return;
+    if (term) {{
+      const hay = normalize(`${{n.label}} ${{n.source_file || ''}} ${{n.community_name || ''}}`);
+      if (!hay.includes(term)) return;
+    }}
+    visibleNodes.add(n.id);
+  }});
+
+  const visibleEdges = new Set();
+  const connected = new Set();
+  RAW_EDGES.forEach((e, i) => {{
+    for (const f of FACETS) {{
+      if (f.appliesTo !== 'edge' || !f.items.length) continue;
+      if (!filters.active[f.key].has(f.read(e))) return;
+    }}
+    if (!visibleNodes.has(e.from) || !visibleNodes.has(e.to)) return;
+    visibleEdges.add(i);
+    connected.add(e.from);
+    connected.add(e.to);
+  }});
+
+  if (filters.hideIsolated) {{
+    [...visibleNodes].forEach(id => {{
+      if (!connected.has(id)) visibleNodes.delete(id);
+    }});
+  }}
+
+  return {{ visibleNodes, visibleEdges }};
+}}
+
+function countActive() {{
+  let n = 0;
+  FACETS.forEach(f => {{ if (f.items.length && filters.active[f.key].size !== f.items.length) n++; }});
+  if (filters.text.trim()) n++;
+  if (filters.degreeMin > 0 || filters.degreeMax < maxDegree) n++;
+  if (filters.hideIsolated) n++;
+  return n;
+}}
+
+const facetGroupsEl = document.getElementById('facet-groups');
+const filtersBadge = document.getElementById('filters-badge');
+
+function renderFacetGroups() {{
+  facetGroupsEl.innerHTML = '';
+  FACETS.forEach(f => {{
+    if (!f.items.length) return;
+    const section = document.createElement('div');
+    section.className = 'facet-section';
+    section.innerHTML = `
+      <div class="facet-section-title">
+        <span>${{esc(f.title)}}</span>
+        <span class="facet-links">
+          <button type="button" data-all="${{esc(f.key)}}">all</button>&middot;<button type="button" data-none="${{esc(f.key)}}">none</button>
+        </span>
+      </div>
+      <div class="facet-list" data-list="${{esc(f.key)}}"></div>
+    `;
+    facetGroupsEl.appendChild(section);
+  }});
+  facetGroupsEl.querySelectorAll('button[data-all]').forEach(btn => {{
+    btn.addEventListener('click', () => {{
+      const f = FACETS.find(x => x.key === btn.dataset.all);
+      filters.active[f.key] = new Set(f.items.map(it => it.value));
+      refresh();
+    }});
+  }});
+  facetGroupsEl.querySelectorAll('button[data-none]').forEach(btn => {{
+    btn.addEventListener('click', () => {{
+      const f = FACETS.find(x => x.key === btn.dataset.none);
+      filters.active[f.key] = new Set();
+      refresh();
+    }});
+  }});
+}}
+
+function updateFacetCounts(visibleNodes, visibleEdges) {{
+  FACETS.forEach(f => {{
+    const list = facetGroupsEl.querySelector(`[data-list="${{f.key}}"]`);
+    if (!list) return;
+    const visibleByValue = f.appliesTo === 'node'
+      ? distinctCounts(RAW_NODES.filter(n => visibleNodes.has(n.id)).map(f.read))
+      : distinctCounts(RAW_EDGES.filter((e, i) => visibleEdges.has(i)).map(f.read));
+    list.innerHTML = '';
+    f.items.forEach(it => {{
+      const active = filters.active[f.key].has(it.value);
+      const visible = visibleByValue.get(it.value) || 0;
+      const row = document.createElement('div');
+      row.className = 'facet-item' + (active ? '' : ' inactive') + (it.total === 0 ? ' zero' : '');
+      row.innerHTML = `
+        <input type="checkbox" class="chk" tabindex="-1" ${{active ? 'checked' : ''}}>
+        ${{it.color ? `<span class="facet-dot" style="background:${{esc(it.color)}}"></span>` : ''}}
+        <span class="facet-label" title="${{esc(it.label)}}">${{esc(it.label)}}</span>
+        <span class="facet-only">only</span>
+        <span class="facet-count">${{visible !== it.total ? `${{fmt(visible)}}/${{fmt(it.total)}}` : fmt(it.total)}}</span>
+      `;
+      row.addEventListener('click', (e) => {{
+        if (e.target.classList.contains('facet-only')) {{
+          filters.active[f.key] = new Set([it.value]);
+        }} else {{
+          const s = filters.active[f.key];
+          if (s.has(it.value)) s.delete(it.value); else s.add(it.value);
+        }}
+        refresh();
+      }});
+      list.appendChild(row);
+    }});
+  }});
+}}
+
+function refresh() {{
+  const {{ visibleNodes, visibleEdges }} = computeVisible();
+  nodesDS.update(RAW_NODES.map(n => ({{ id: n.id, hidden: !visibleNodes.has(n.id) }})));
+  edgesDS.update(RAW_EDGES.map((e, i) => ({{ id: i, hidden: !visibleEdges.has(i) }})));
+  updateFacetCounts(visibleNodes, visibleEdges);
+  const active = countActive();
+  filtersBadge.textContent = String(active);
+  filtersBadge.style.display = active > 0 ? 'inline-block' : 'none';
+  document.getElementById('degree-range-label').textContent = `${{fmt(filters.degreeMin)}}–${{fmt(filters.degreeMax)}}`;
+}}
+
+renderFacetGroups();
+
+const facetTextInput = document.getElementById('facet-text');
+facetTextInput.addEventListener('input', () => {{
+  filters.text = facetTextInput.value;
+  refresh();
+}});
+
+const degreeMinInput = document.getElementById('degree-min');
+const degreeMaxInput = document.getElementById('degree-max');
+degreeMinInput.value = 0;
+degreeMaxInput.value = maxDegree;
+degreeMinInput.max = String(maxDegree);
+degreeMaxInput.max = String(maxDegree);
+degreeMinInput.addEventListener('input', () => {{
+  filters.degreeMin = Math.max(0, Number(degreeMinInput.value) || 0);
+  refresh();
+}});
+degreeMaxInput.addEventListener('input', () => {{
+  const v = Number(degreeMaxInput.value);
+  filters.degreeMax = degreeMaxInput.value !== '' && Number.isFinite(v) ? v : maxDegree;
+  refresh();
+}});
+
+document.getElementById('hide-isolated-cb').addEventListener('change', (e) => {{
+  filters.hideIsolated = e.target.checked;
+  refresh();
+}});
+
+document.getElementById('filters-clear').addEventListener('click', () => {{
+  filters.text = '';
+  filters.degreeMin = 0;
+  filters.degreeMax = maxDegree;
+  filters.hideIsolated = false;
+  FACETS.forEach(f => {{ filters.active[f.key] = new Set(f.items.map(it => it.value)); }});
+  facetTextInput.value = '';
+  degreeMinInput.value = 0;
+  degreeMaxInput.value = maxDegree;
+  document.getElementById('hide-isolated-cb').checked = false;
+  refresh();
+}});
+
+refresh();
 </script>"""
 
 
@@ -405,8 +608,10 @@ def to_html(
     """Generate an interactive vis.js HTML visualization of the graph.
 
     Features: node size by degree, click-to-inspect panel, search box,
-    community filter, physics clustering by community, confidence-styled edges.
-    Raises ValueError if graph exceeds MAX_NODES_FOR_VIZ.
+    physics clustering by community, confidence-styled edges, and a
+    facet-based filters panel (node type, community, relation, confidence,
+    degree range, text quick-filter, hide-isolated) with live visible/total
+    counts per facet value. Raises ValueError if graph exceeds MAX_NODES_FOR_VIZ.
 
     If member_counts is provided (aggregated community view), node sizes are
     based on community member counts rather than graph degree.
@@ -619,12 +824,23 @@ def to_html(
     <h3>Node Info</h3>
     <div id="info-content"><span class="empty">Click a node to inspect it</span></div>
   </div>
-  <div id="legend-wrap">
-    <h3>Communities</h3>
-    <div id="legend-controls">
-      <label><input type="checkbox" id="select-all-cb" checked onchange="toggleAllCommunities(!this.checked)">Select All</label>
+  <div id="filters-wrap">
+    <div class="filters-header">
+      <h3>Filters <span id="filters-badge" class="filters-badge">0</span></h3>
+      <button type="button" id="filters-clear" class="filters-clear">Clear</button>
     </div>
-    <div id="legend"></div>
+    <div id="facet-text-wrap">
+      <input id="facet-text" type="text" placeholder="Filter by name, file, community&hellip;" autocomplete="off">
+    </div>
+    <div id="facet-groups"></div>
+    <div class="facet-section" id="degree-section">
+      <div class="facet-section-title"><span>Degree (connections)</span><span id="degree-range-label"></span></div>
+      <div class="degree-inputs">
+        <input type="number" id="degree-min" min="0" step="1" aria-label="Minimum degree">
+        <input type="number" id="degree-max" min="0" step="1" aria-label="Maximum degree">
+      </div>
+    </div>
+    <label class="toggle-row"><input type="checkbox" id="hide-isolated-cb" class="chk"> Hide isolated nodes</label>
   </div>
   <div id="stats">{stats}</div>
 </div>

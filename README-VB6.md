@@ -1,32 +1,34 @@
-# Using this Graphify fork with a VB6 project
+# Usando este fork do Graphify com um projeto VB6
 
-This fork indexes VB6 source locally, without a VB6 installation, an LLM, or an
-API key. Each VB6 project installs this fork and its Python dependencies into
-its own environment, then indexes itself. No Graphify checkout or environment
-on another user's machine is needed.
+Este fork indexa código-fonte VB6 localmente, sem precisar de uma instalação do
+VB6, de um LLM ou de uma chave de API. Cada projeto VB6 instala este fork e
+suas dependências Python no seu próprio ambiente e então indexa a si mesmo.
+Não é necessário nenhum checkout do Graphify nem um ambiente configurado em
+outra máquina.
 
-## Declare the dependency in your VB6 project
+## Declare a dependência no seu projeto VB6
 
-Create `requirements-graphify.txt` in your **VB6 project's root directory**:
+Crie o arquivo `requirements-graphify.txt` na **raiz do seu projeto VB6**:
 
 ```text
-graphifyy @ git+https://github.com/RaelsonAraujoVibe/graphify.git@<VB6_COMMIT_OR_TAG>
+graphifyy @ git+https://github.com/RaelsonAraujoVibe/graphify.git@v8
 ```
 
-Replace `<VB6_COMMIT_OR_TAG>` with a published commit hash or tag containing this
-fork's VB6 changes. Commit this requirements file alongside your VB6 source so
-every contributor installs the same extractor. If you host your own fork,
-replace the repository URL too. Private repositories require Git access.
+`@v8` aponta para a branch onde vivem as alterações deste fork para VB6. Rodando a instalação com `--upgrade` (veja "Atualize o
+extrator do projeto" abaixo), o pip busca automaticamente o commit mais
+recente dessa branch..
 
-The VB6 changes must be committed and pushed before this Git installation can
-fetch them. Until then, use the wheel distribution option below. Installing
-`graphifyy` from PyPI alone does not include this fork's changes.
+Se preferir travar numa versão específica em vez de sempre seguir a última
+da branch — por exemplo, para reproduzir uma indexação antiga — substitua
+`@v8` por um hash de commit ou tag publicado, como
+`@4c6156f889af35f3ba77a4682e4db8ab6b3412a6`.
 
-## Install and index from your VB6 project
+## Instale e indexe a partir do seu projeto VB6
 
-Open a terminal in the VB6 project's root, where `requirements-graphify.txt`
-lives. Install Python 3.11 and Git first. The commands below create a dedicated
-environment for indexing; pip installs Graphify and its declared dependencies.
+Abra um terminal na raiz do projeto VB6, onde está o `requirements-graphify.txt`.
+Instale antes o Python 3.11 e o Git. Os comandos abaixo criam um ambiente
+dedicado para a indexação; o pip instala o Graphify e suas dependências
+declaradas.
 
 ### Windows (PowerShell)
 
@@ -44,9 +46,9 @@ python3.11 -m venv .venv-graphify
 .venv-graphify/bin/graphify update .
 ```
 
-### Alternative installation with uv
+### Instalação alternativa com uv
 
-From the same VB6 project directory, on Windows:
+A partir da mesma pasta do projeto VB6, no Windows:
 
 ```powershell
 uv venv .venv-graphify --python 3.11
@@ -54,70 +56,78 @@ uv pip install --python .venv-graphify\Scripts\python.exe -r requirements-graphi
 .\.venv-graphify\Scripts\graphify.exe update .
 ```
 
-On macOS/Linux, use `.venv-graphify/bin/python` and
-`.venv-graphify/bin/graphify` for the environment executables.
+No macOS/Linux, use `.venv-graphify/bin/python` e `.venv-graphify/bin/graphify`
+como executáveis do ambiente.
 
-Environment activation is optional: these commands explicitly use the project's
-installed executable. They work independently of any global Graphify install.
-Package installation needs network access; VB6 indexing itself runs locally.
+Ativar o ambiente é opcional: estes comandos usam diretamente o executável
+instalado no projeto. Eles funcionam independentemente de qualquer instalação
+global do Graphify. A instalação dos pacotes precisa de acesso à rede; a
+indexação do VB6 em si roda localmente.
 
-Add these entries to the VB6 project's `.gitignore` and `.graphifyignore` to
-exclude the environment and generated index:
+Adicione estas entradas ao `.gitignore` e ao `.graphifyignore` do projeto VB6
+para excluir o ambiente e o índice gerado:
 
 ```gitignore
 .venv-graphify/
 graphify-out/
 ```
 
-If you intentionally version the generated index, omit `graphify-out/` from
+Se você versionar intencionalmente o índice gerado, remova `graphify-out/` do
 `.gitignore`.
 
-## Index outputs
+## Saídas da indexação
 
-`update` can create the first graph as well as refresh an existing one. This
-command performs local structural extraction and writes under the project's
-`graphify-out/` directory:
+O comando `update` tanto cria o primeiro grafo quanto atualiza um já
+existente. Ele executa a extração estrutural local e grava, dentro do
+diretório `graphify-out/` do projeto:
 
-- `graph.json`: nodes, relationships, and source locations.
-- `GRAPH_REPORT.md`: communities and the most connected symbols.
-- `graph.html`: interactive graph visualization.
+- `graph.json`: nós, relacionamentos e localizações no código-fonte.
+- `GRAPH_REPORT.md`: comunidades e os símbolos mais conectados.
+- `graph.html`: visualização interativa do grafo, com um painel de filtros
+  por facetas (tipo de nó, comunidade, tipo de relação, confiança da aresta e
+  grau de conexões), busca por texto e contadores de "visível/total" por
+  facet — útil para isolar só as partes do grafo que interessam num projeto
+  grande.
 
-Open `graphify-out/graph.html` in your browser. Index a **directory**, not just
-the `.vbp` file. The scanner processes supported files beneath that directory;
-`.vbp` membership adds project structure but does not limit the scan to listed
-files or automatically load files outside the directory. Choose a common parent
-directory if the project uses shared modules in sibling folders.
+Abra `graphify-out/graph.html` no navegador. Indexe um **diretório**, não
+apenas o arquivo `.vbp`. O scanner processa os arquivos suportados abaixo
+desse diretório; a associação via `.vbp` adiciona estrutura de projeto, mas
+não limita a varredura aos arquivos listados nem carrega automaticamente
+arquivos fora do diretório. Escolha um diretório pai comum se o projeto usa
+módulos compartilhados em pastas irmãs.
 
-## Query and refresh
+## Consultar e atualizar
 
-While in the VB6 project directory:
+Dentro do diretório do projeto VB6:
 
 ```powershell
-.\.venv-graphify\Scripts\graphify.exe query 'Customer Save Validate'
+.\.venv-graphify\Scripts\graphify.exe query 'Cliente Salvar Validar'
 .\.venv-graphify\Scripts\graphify.exe explain 'Form_Load'
-.\.venv-graphify\Scripts\graphify.exe path 'Save' 'Validate'
+.\.venv-graphify\Scripts\graphify.exe path 'Salvar' 'Validar'
 
-# Refresh after changing VB6 source:
+# Atualizar após alterar o código-fonte VB6:
 .\.venv-graphify\Scripts\graphify.exe update .
 
-# Re-extract after changing the extractor or replacing an older Apex-based graph:
+# Reextrair após alterar o extrator ou substituir um grafo antigo baseado em Apex:
 .\.venv-graphify\Scripts\graphify.exe update . --force
 ```
 
-Use names that exist in your own project in place of the sample symbols.
-On macOS/Linux, substitute `.venv-graphify/bin/graphify` for the executable.
-`--force` also permits replacing an existing graph with a smaller result.
-Back up an existing `graphify-out/` first if you want to retain the previous graph.
+Use nomes que existam no seu próprio projeto no lugar dos símbolos de exemplo.
+No macOS/Linux, substitua pelo executável `.venv-graphify/bin/graphify`.
+`--force` também permite substituir um grafo existente por um resultado
+menor. Faça backup de um `graphify-out/` existente antes, se quiser manter o
+grafo anterior.
 
-For a large project, skip clustering/HTML and produce just the raw index:
+Para um projeto grande, pule a clusterização/HTML e gere apenas o índice bruto:
 
 ```powershell
 .\.venv-graphify\Scripts\graphify.exe update . --no-cluster
 ```
 
-Afterwards, a regular `update .` can build the report and visualization. Existing
-`.gitignore` rules are respected. Add a `.graphifyignore` in the target root to
-exclude backup copies or generated source, for example:
+Depois, um `update .` normal pode gerar o relatório e a visualização. As
+regras existentes do `.gitignore` são respeitadas. Adicione um
+`.graphifyignore` na raiz alvo para excluir cópias de backup ou código
+gerado, por exemplo:
 
 ```gitignore
 backups/**
@@ -125,22 +135,28 @@ archive/**
 generated/**
 ```
 
-## Upgrade the project's extractor
+## Atualize o extrator do projeto
 
-Update the pinned commit or tag in `requirements-graphify.txt`, then run from
-the VB6 project root:
+Como `requirements-graphify.txt` aponta para a branch `v8` em vez de um
+commit fixo, não há nada para editar: `pip install --upgrade` já busca e
+instala o commit mais recente dessa branch. A partir da raiz do projeto VB6,
+execute:
 
 ```powershell
 .\.venv-graphify\Scripts\python.exe -m pip install --upgrade -r requirements-graphify.txt
 .\.venv-graphify\Scripts\graphify.exe update . --force
 ```
 
-Force a rebuild after extractor upgrades so an existing index is regenerated
-with the new extraction behavior.
+Force uma reconstrução após atualizar o extrator, para que um índice
+existente seja regerado com o novo comportamento de extração. Se
+`pip install --upgrade` não detectar uma mudança recente (por exemplo, por
+causa de cache local), acrescente `--force-reinstall` ao comando para forçar
+uma reinstalação completa a partir do commit atual da branch.
 
-## Distribute a wheel instead of installing from Git
+## Distribua um wheel em vez de instalar via Git
 
-A maintainer can package this fork once, **from the Graphify source checkout**:
+Um mantenedor pode empacotar este fork uma única vez, **a partir do checkout
+do Graphify**:
 
 ```powershell
 py -3.11 -m venv .venv-build
@@ -148,64 +164,79 @@ py -3.11 -m venv .venv-build
 .\.venv-build\Scripts\python.exe -m build --wheel
 ```
 
-Give users the resulting `.whl` from `dist/`. In their VB6 project, they put it
-under `vendor/` and use a relative entry in `requirements-graphify.txt`, for
-example with this checkout's current version:
+Entregue o `.whl` resultante da pasta `dist/` para os usuários. No projeto
+VB6 deles, o arquivo vai em `vendor/` e usa uma entrada relativa em
+`requirements-graphify.txt`, por exemplo com a versão atual deste checkout:
 
 ```text
 ./vendor/graphifyy-0.9.61-py3-none-any.whl
 ```
 
-Use the actual wheel filename if the version changes. The installation and
-indexing commands above stay the same. pip installs the wheel's dependencies
-automatically; users need Python but not Git or a Graphify source checkout.
-Include the wheel in your project's distribution if using this option.
+Use o nome de arquivo real do wheel se a versão mudar. Os comandos de
+instalação e indexação acima permanecem os mesmos. O pip instala as
+dependências do wheel automaticamente; os usuários precisam do Python, mas
+não do Git nem de um checkout do Graphify. Inclua o wheel na distribuição do
+seu projeto se usar essa opção.
 
-## VB6 coverage
+## Cobertura do VB6
 
-| Files | Indexed content |
+| Arquivos | Conteúdo indexado |
 | --- | --- |
-| `.vbp` | Project membership; `Reference=` and `Object=` dependencies as reference nodes. |
-| `.bas` | Module, procedures, functions, constants, variables, types, enums, events, and `Declare` declarations. |
-| `.cls` | Class and members; `Property Get/Let/Set` as separate nodes; `Implements` references. |
-| `.frm` | Form and its executable code, including event-handler procedures. |
+| `.vbp` | Associação de projeto; dependências `Reference=` e `Object=` como nós de referência. |
+| `.bas` | Módulo, procedimentos, funções, constantes, variáveis, tipos, enums, eventos e declarações `Declare`. |
+| `.cls` | Classe e membros; `Property Get/Let/Set` como nós separados; referências `Implements`. |
+| `.frm` | Formulário e seu código executável, incluindo procedimentos de tratamento de evento. |
 
-`.cls` deliberately means VB6 in this fork. Apex `.cls` dispatch is replaced;
-the standalone Apex extractor and `.trigger` dispatch remain available.
+Neste fork, `.cls` deliberadamente significa VB6. O dispatch de `.cls` do
+Apex foi substituído; o extrator standalone de Apex e o dispatch de
+`.trigger` continuam disponíveis.
 
-The scanner handles case-insensitive names, quoted strings, apostrophe/`Rem`
-comments, colon-separated statements, and `_` line continuations. Source locations
-refer to original physical lines (continued statements use the first line).
-It reads UTF-8, BOM-marked UTF-16, and Windows-1252. Convert projects using another
-ANSI code page to UTF-8 before indexing.
+O scanner trata nomes sem diferenciar maiúsculas/minúsculas, strings entre
+aspas, comentários com apóstrofo/`Rem`, instruções separadas por dois-pontos
+e continuações de linha com `_`. As localizações de origem referem-se às
+linhas físicas originais (instruções continuadas usam a primeira linha). Ele
+lê UTF-8, UTF-16 com BOM e Windows-1252. Converta projetos que usem outra
+página de código ANSI para UTF-8 antes de indexar.
 
-### Current limits
+### Limitações atuais
 
-- Designer blocks, visual properties, control nodes, and binary `.frx` resources
-  are skipped. A `cmdSave_Click` procedure is indexed, but no control-to-handler
-  edge is created.
-- Call edges bind only unambiguous `Sub`, `Function`, and `Declare` targets in the
-  same file. Cross-file calls, object/member dispatch, property-access calls,
-  `With` receivers, default members, and COM/late binding are not resolved.
-- `Implements` records the named interface as an unresolved reference; it does
-  not yet link to the interface class's definition in another file.
-- Both branches of conditional compilation are indexed. The scanner does not
-  evaluate `#If` expressions; duplicate procedure names remain ambiguous.
-- Missing/outside-root `.vbp` members appear as file references only. Other VB6
-  source formats such as `.ctl`, `.pag`, `.dob`, and `.dsr` are not parsed yet.
-- This is structural indexing, not a compiler or a complete VB6 call graph.
+- Blocos de designer, propriedades visuais, nós de controle e recursos
+  binários `.frx` são ignorados. Um procedimento `cmdSave_Click` é indexado,
+  mas nenhuma aresta controle-para-handler é criada.
+- Arestas de chamada só vinculam alvos `Sub`, `Function` e `Declare` sem
+  ambiguidade no mesmo arquivo. Chamadas entre arquivos, dispatch de
+  objeto/membro, chamadas via acesso a propriedade, receptores `With`,
+  membros default e COM/late binding não são resolvidos.
+- `Implements` registra a interface nomeada como uma referência não
+  resolvida; ainda não faz o link com a definição da classe de interface em
+  outro arquivo.
+- Ambos os ramos de compilação condicional são indexados. O scanner não
+  avalia expressões `#If`; nomes de procedimento duplicados permanecem
+  ambíguos.
+- Membros de `.vbp` ausentes ou fora da raiz aparecem apenas como
+  referências de arquivo. Outros formatos de origem VB6, como `.ctl`, `.pag`,
+  `.dob` e `.dsr`, ainda não são interpretados.
+- Isto é indexação estrutural, não um compilador nem um grafo de chamadas
+  VB6 completo.
 
-## Extractor development (maintainers only)
+## Desenvolvimento do extrator (apenas para mantenedores)
 
-To work on this fork itself, from a Graphify checkout:
+Para trabalhar neste fork em si, a partir de um checkout do Graphify:
 
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e . pytest
 .\.venv\Scripts\graphify.exe update tests/fixtures/vb6
-.\.venv\Scripts\graphify.exe query 'Customer Save Validate' --graph tests/fixtures/vb6/graphify-out/graph.json
+.\.venv\Scripts\graphify.exe query 'Cliente Salvar Validar' --graph tests/fixtures/vb6/graphify-out/graph.json
 .\.venv\Scripts\python.exe -m pytest tests/test_vb6.py tests/test_extractors_registry.py -q
 ```
 
-This development workflow is separate from the project-local installation that
-VB6 project contributors use.
+Este fluxo de desenvolvimento é separado da instalação local do projeto que
+os contribuidores VB6 usam.
+
+Para validar especificamente as mudanças no painel de filtros do
+`graph.html` (`graphify/exporters/html.py`), rode:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_export.py -q
+```
