@@ -812,9 +812,19 @@ function showDrilldownWarning(msg) {{
 // rather than being tuned to one dataset.
 // ---------------------------------------------------------------------
 const LOD_ACTIVATION_THRESHOLD = 2000;
-let lodNodeIds = null;       // null = LOD inactive; every active node eligible
-let lodEdgesEnabled = true;  // the "mapa" level disables edges outright
-let lodHiddenHubIds = null;  // edges touching these ids are suppressed even when lodEdgesEnabled
+// Hard ceiling on edges actually drawn at once whenever LOD is active,
+// independent of how many pass the per-level node/degree/viewport rules
+// above. Those rules alone still let edge count balloon — a viewport full
+// of only moderately-connected nodes can still have thousands of edges
+// between them — and edges are the more expensive half of the two costs
+// profiled (network.redraw() with a large edge set vs. with it capped).
+// Picked for legibility, not just raw redraw cost: 1,500 already measured
+// fast (~41ms redraw) but still read as a dense hairball on a real densely
+// cross-referenced codebase; 500 is comfortably inside the performance
+// budget with real headroom to spare and reads as an actual diagram.
+const LOD_EDGE_CAP = 500;
+let lodNodeIds = null;         // null = LOD inactive; every active node eligible
+let lodAllowedEdgeIds = null;  // null = no LOD edge restriction; otherwise the exact allowed edge ids
 
 function lodActive() {{
   return activeNodeArray().length > LOD_ACTIVATION_THRESHOLD;
@@ -838,34 +848,71 @@ function lodViewportRect(marginFactor) {{
 function recomputeLod() {{
   if (!lodActive()) {{
     lodNodeIds = null;
-    lodEdgesEnabled = true;
-    lodHiddenHubIds = null;
+    lodAllowedEdgeIds = null;
     return;
   }}
   const nodeArr = activeNodeArray();
   const scale = network.getScale();
   const th = lodDegreeThresholds(nodeArr);
+  let edgesEnabled = true;
+  let hiddenHubIds = null;
 
   if (scale < lodInitialScale * 3) {{
     lodNodeIds = new Set(nodeArr.filter(n => (n.degree || 0) >= th.hub).map(n => n.id));
-    lodEdgesEnabled = false;
-    lodHiddenHubIds = null;
+    edgesEnabled = false;
   }} else if (scale < lodInitialScale * 10) {{
     const rect = lodViewportRect(1.4);
     lodNodeIds = new Set(nodeArr.filter(n =>
       (n.degree || 0) >= th.mid &&
       n.x >= rect.minX && n.x <= rect.maxX && n.y >= rect.minY && n.y <= rect.maxY
     ).map(n => n.id));
-    lodEdgesEnabled = true;
-    lodHiddenHubIds = new Set(nodeArr.filter(n => (n.degree || 0) >= th.hubSuppress).map(n => n.id));
+    hiddenHubIds = new Set(nodeArr.filter(n => (n.degree || 0) >= th.hubSuppress).map(n => n.id));
   }} else {{
     const rect = lodViewportRect(1.2);
     lodNodeIds = new Set(nodeArr.filter(n =>
       n.x >= rect.minX && n.x <= rect.maxX && n.y >= rect.minY && n.y <= rect.maxY
     ).map(n => n.id));
-    lodEdgesEnabled = true;
-    lodHiddenHubIds = null;
   }}
+
+  if (!edgesEnabled) {{
+    lodAllowedEdgeIds = new Set();
+    return;
+  }}
+
+  // nodeArr may be FULL_NODES or RAW_NODES depending on drill-down state,
+  // so this is built fresh from whatever's actually active rather than
+  // assuming a single global degree source.
+  const posById = new Map(nodeArr.map(n => [n.id, n]));
+
+  const candidates = [];
+  activeEdgeArray().forEach(e => {{
+    if (!lodNodeIds.has(e.from) || !lodNodeIds.has(e.to)) return;
+    if (hiddenHubIds && (hiddenHubIds.has(e.from) || hiddenHubIds.has(e.to))) return;
+    candidates.push(e);
+  }});
+
+  if (candidates.length > LOD_EDGE_CAP) {{
+    // Rank by on-canvas endpoint distance, ascending: an edge whose two
+    // endpoints sit close together reads as one clean local link, while an
+    // edge stretching across most of the viewport is what actually produces
+    // the "hairball" — a dense mesh of long crossing lines — regardless of
+    // how many total edges are technically candidates. Degree alone (the
+    // earlier heuristic) doesn't capture this: two moderately-connected
+    // nodes can still sit on opposite sides of the screen, especially under
+    // the sunflower-spiral fallback layout where graph adjacency and
+    // spiral-index proximity aren't the same thing. Capping by distance
+    // keeps the shortest, most legible edges and drops exactly the long
+    // reaching ones that make a capped-but-still-dense view look tangled.
+    candidates.sort((a, b) => {{
+      const pa1 = posById.get(a.from), pa2 = posById.get(a.to);
+      const pb1 = posById.get(b.from), pb2 = posById.get(b.to);
+      const da = Math.hypot(pa1.x - pa2.x, pa1.y - pa2.y);
+      const db = Math.hypot(pb1.x - pb2.x, pb1.y - pb2.y);
+      return da - db;
+    }});
+    candidates.length = LOD_EDGE_CAP;
+  }}
+  lodAllowedEdgeIds = new Set(candidates.map(e => e._id));
 }}
 
 const lodStatusEl = document.getElementById('lod-status');
@@ -873,9 +920,11 @@ function updateLodStatus() {{
   if (!lodStatusEl) return;
   if (!lodActive()) {{ lodStatusEl.style.display = 'none'; return; }}
   lodStatusEl.style.display = 'block';
-  const total = activeNodeArray().length;
-  const shown = lodNodeIds ? lodNodeIds.size : total;
-  lodStatusEl.textContent = `Grafo grande: mostrando ${{fmt(shown)}} de ${{fmt(total)}} nós — zoom/pan para ver mais`;
+  const totalNodes = activeNodeArray().length;
+  const shownNodes = lodNodeIds ? lodNodeIds.size : totalNodes;
+  const shownEdges = lodAllowedEdgeIds ? lodAllowedEdgeIds.size : null;
+  const edgePart = shownEdges === null ? '' : `, ${{fmt(shownEdges)}}${{shownEdges >= LOD_EDGE_CAP ? '+' : ''}} arestas`;
+  lodStatusEl.textContent = `Grafo grande: mostrando ${{fmt(shownNodes)}} de ${{fmt(totalNodes)}} nós${{edgePart}} — zoom/pan para ver mais`;
 }}
 
 let lodDebounce = null;
@@ -1141,10 +1190,7 @@ function computeVisible() {{
       if (!filters.active[f.key].has(f.read(e))) return;
     }}
     if (!visibleNodes.has(e.from) || !visibleNodes.has(e.to)) return;
-    if (lodNodeIds !== null) {{
-      if (!lodEdgesEnabled) return;
-      if (lodHiddenHubIds && (lodHiddenHubIds.has(e.from) || lodHiddenHubIds.has(e.to))) return;
-    }}
+    if (lodAllowedEdgeIds !== null && !lodAllowedEdgeIds.has(e._id)) return;
     visibleEdges.add(e._id);
     connected.add(e.from);
     connected.add(e.to);
