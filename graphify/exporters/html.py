@@ -40,6 +40,21 @@ _LAYOUT_SCALE = 800.0
 # would need a second pass — to size cells so that even two adjacent
 # maximum-size nodes never touch.
 _MAX_NODE_RADIUS = 40.0
+# Spread of each *per-community* local layout (Camada 4 drill-down), in the
+# same canvas-unit space as _LAYOUT_SCALE but deliberately smaller: a local
+# layout only has to separate one community's own members from each other,
+# not the whole graph. Every observed real-world community (pd-desenv's
+# largest is under 400 members) is comfortably inside _LAYOUT_MAX_NODES, so
+# the per-community spring_layout in `_precompute_community_layouts` is
+# always fast even though the whole-graph layout above it isn't.
+_LOCAL_LAYOUT_SCALE = 300.0
+# Hard cap on how many real (drilled-down) nodes may be expanded onto the
+# canvas at once, across however many communities are open simultaneously.
+# Matches _LAYOUT_MAX_NODES deliberately: that's the point past which even a
+# single server-side spring_layout call stops being a sub-second cost, and
+# past which vis-network's own rendering gets sluggish with everything
+# unhidden at once. Enforced client-side in `_html_script()`.
+_DRILLDOWN_NODE_CAP = 1_200
 
 
 def _grid_layout(G: nx.Graph) -> dict:
@@ -115,6 +130,52 @@ def _precompute_layout(G: nx.Graph) -> dict | None:
     return _grid_layout(G)
 
 
+def _precompute_community_layouts(G: nx.Graph, communities: dict[int, list[str]]) -> dict:
+    """Per-community local layout, for Camada 4 drill-down node placement.
+
+    Each community's members get their own small spring_layout, computed
+    independently of every other community. That's what lets community
+    expansion happen incrementally in the browser with zero client-side
+    layout math: the server already knows exactly where each real node
+    should sit *relative to its own community's center*, and the browser
+    only has to add the community's meta-node's own current x/y (its
+    resting position in the already-rendered outer view) once, at expand
+    time — see `expandCommunity()` in `_html_script()`.
+
+    Every community observed in practice (pd-desenv's largest is well under
+    400 members) is comfortably inside `_LAYOUT_MAX_NODES`, so the
+    spring_layout call here is always fast — but a defensive grid fallback
+    still applies per-community (mirroring `_precompute_layout`'s own
+    fallback), in case some other codebase produces one outsized community.
+    Single-node communities are skipped: nothing to lay out relative to
+    (the sole member simply sits at the community's own center, offset 0).
+
+    Returns *local*, not-yet-offset canvas-unit coordinates, keyed by node
+    id, for every node that belongs to a community with 2+ members.
+    """
+    positions: dict = {}
+    for cid, members in communities.items():
+        sub_nodes = [m for m in members if G.has_node(m)]
+        if len(sub_nodes) <= 1:
+            continue
+        sub = G.subgraph(sub_nodes)
+        if len(sub_nodes) <= _LAYOUT_MAX_NODES:
+            try:
+                raw = nx.spring_layout(sub, seed=42)
+                for node, (x, y) in raw.items():
+                    positions[node] = (x * _LOCAL_LAYOUT_SCALE, y * _LOCAL_LAYOUT_SCALE)
+                continue
+            except Exception:
+                pass
+        grid = _grid_layout(sub)
+        if grid:
+            cx = sum(p[0] for p in grid.values()) / len(grid)
+            cy = sum(p[1] for p in grid.values()) / len(grid)
+            for node, (x, y) in grid.items():
+                positions[node] = (x - cx, y - cy)
+    return positions
+
+
 def _hub_alpha(base: float, hub_degree: int) -> float:
     """Dampen edge opacity for edges touching a high-degree hub node.
 
@@ -142,6 +203,125 @@ def _viz_node_limit() -> int:
         return int(raw)
     except ValueError:
         return MAX_NODES_FOR_VIZ
+
+
+def _build_vis_nodes(
+    G: nx.Graph,
+    node_community: dict,
+    degree: dict,
+    max_deg: int,
+    community_labels: dict[int, str] | None,
+    member_counts: dict[int, int] | None,
+    max_mc: int,
+    positions: dict | None,
+    learning_overlay: dict,
+) -> list[dict]:
+    """Build the vis.js node dict list for one graph.
+
+    Pulled out of `to_html()` so the exact same node-shaping logic can be
+    reused for two different graphs in the same export: whichever graph
+    `to_html()` was actually called with (the primary render), and — when
+    Camada 4 drill-down data is being embedded — the *original*, pre-
+    aggregation per-symbol graph (see `to_html()`'s `full_graph` parameter).
+    Keeping both call sites in lockstep means a future field added to a node
+    (a new facet, say) only needs to be added once.
+    """
+    vis_nodes = []
+    for node_id, data in G.nodes(data=True):
+        cid = node_community.get(node_id, 0)
+        color = COMMUNITY_COLORS[cid % len(COMMUNITY_COLORS)]
+        label = sanitize_label(data.get("label", node_id))
+        deg = degree.get(node_id, 1)
+        if member_counts:
+            mc = member_counts.get(cid, 1)
+            size = 10 + 30 * (mc / max_mc)
+            font_size = 12
+        else:
+            size = 10 + 30 * (deg / max_deg)
+            # Only show label for high-degree nodes by default; others show on hover
+            font_size = 12 if deg >= max_deg * 0.15 else 0
+        node = {
+            "id": node_id,
+            "label": label,
+            "color": {"background": color, "border": color, "highlight": {"background": "#ffffff", "border": color}},
+            "size": round(size, 1),
+            "font": {"size": font_size, "color": "#ffffff"},
+            "title": _html.escape(label),
+            "community": cid,
+            "community_name": sanitize_label((community_labels or {}).get(cid, f"Community {cid}")),
+            "source_file": sanitize_label(str(data.get("source_file") or "")),
+            "file_type": data.get("file_type", ""),
+            "kind": sanitize_label(str((data.get("metadata") or {}).get("kind", "") or "")),
+            "degree": deg,
+            "is_meta": bool(data.get("is_meta", False)),
+        }
+        if member_counts:
+            node["member_count"] = member_counts.get(cid, 0)
+        if positions is not None and node_id in positions:
+            # _precompute_layout / _precompute_community_layouts already return
+            # final canvas-unit coordinates — no further scaling here.
+            px, py = positions[node_id]
+            node["x"] = round(float(px), 1)
+            node["y"] = round(float(py), 1)
+        # Conditional learning fields — only present for annotated nodes, so
+        # un-annotated output keeps the exact pre-feature node dict shape.
+        entry = learning_overlay.get(str(node_id)) if learning_overlay else None
+        if entry:
+            status = sanitize_label(str(entry.get("status", "")))
+            stale = bool(entry.get("stale"))
+            node["learning_status"] = status
+            node["learning_stale"] = stale
+            ring = _RING.get(status)
+            if ring:
+                # Status-colored ring via the border; stale => desaturated +
+                # dashed (vis.js supports per-node `shapeProperties.borderDashes`).
+                if stale:
+                    ring = "#9ca3af"
+                    node["shapeProperties"] = {"borderDashes": [4, 4]}
+                node["borderWidth"] = 3
+                node["color"] = {
+                    "background": color, "border": ring,
+                    "highlight": {"background": "#ffffff", "border": ring},
+                }
+            # Lesson line appended to the hover title.
+            if status == "contested":
+                lesson = f"Lesson: contested (useful {entry.get('uses', 0)} / dead-end {entry.get('neg', 0)})"
+            elif status == "preferred":
+                lesson = f"Lesson: preferred source ({entry.get('uses', 0)} useful, score={entry.get('score', 0)})"
+            else:
+                lesson = f"Lesson: {status} ({entry.get('uses', 0)} useful)"
+            if stale:
+                lesson += " [code changed — re-verify]"
+            node["title"] = _html.escape(label) + "\n" + _html.escape(sanitize_label(lesson))
+        vis_nodes.append(node)
+    return vis_nodes
+
+
+def _build_vis_edges(G: nx.Graph, degree: dict) -> list[dict]:
+    """Build the vis.js edge dict list for one graph. See `_build_vis_nodes`."""
+    vis_edges = []
+    for u, v, data in G.edges(data=True):
+        confidence = data.get("confidence", "EXTRACTED")
+        relation = data.get("relation", "")
+        true_src = data.get("_src", u)
+        true_tgt = data.get("_tgt", v)
+        base_opacity = 0.7 if confidence == "EXTRACTED" else 0.35
+        hub_degree = max(degree.get(true_src, 0), degree.get(true_tgt, 0))
+        vis_edges.append({
+            "from": true_src,
+            "to": true_tgt,
+            "label": relation,
+            "title": _html.escape(f"{relation} [{confidence}]"),
+            "dashes": confidence != "EXTRACTED",
+            "width": 2 if confidence == "EXTRACTED" else 1,
+            "color": {"opacity": round(_hub_alpha(base_opacity, hub_degree), 3)},
+            "confidence": confidence,
+        })
+    return vis_edges
+
+
+_RING = {"preferred": "#22c55e", "contested": "#f59e0b"}
+
 
 def _html_styles() -> str:
     return """<style>
@@ -265,11 +445,27 @@ network.on('afterDrawing', function(ctx) {{
 }});
 </script>"""
 
-def _html_script(nodes_json: str, edges_json: str, legend_json: str) -> str:
+def _html_script(
+    nodes_json: str,
+    edges_json: str,
+    legend_json: str,
+    full_nodes_json: str = "[]",
+    full_edges_json: str = "[]",
+    drilldown_cap: int = _DRILLDOWN_NODE_CAP,
+) -> str:
     return f"""<script>
 const RAW_NODES = {nodes_json};
 const RAW_EDGES = {edges_json};
 const LEGEND = {legend_json};
+// Camada 4 (semantic zoom / community drill-down): only non-empty when this
+// export is an aggregated community view built with `--node-limit` AND the
+// full per-symbol graph was embedded alongside it — see `to_html()`'s
+// `full_graph` parameter in html.py. Empty on every other export (the
+// common case), in which case every HAS_DRILLDOWN branch below is dead code
+// and behavior is byte-for-byte the pre-Camada-4 behavior.
+const FULL_NODES = {full_nodes_json};
+const FULL_EDGES = {full_edges_json};
+const DRILLDOWN_NODE_CAP = {drilldown_cap};
 
 // HTML-escape helper — prevents XSS when injecting graph data into innerHTML
 function esc(s) {{
@@ -293,6 +489,7 @@ const nodesDS = new vis.DataSet(RAW_NODES.map(n => ({{
   ...(HAS_LAYOUT ? {{ x: n.x, y: n.y }} : {{}}),
   _community: n.community, _community_name: n.community_name,
   _source_file: n.source_file, _file_type: n.file_type, _kind: n.kind, _degree: n.degree,
+  _is_meta: !!n.is_meta,
 }})));
 
 const edgesDS = new vis.DataSet(RAW_EDGES.map((e, i) => ({{
@@ -341,6 +538,196 @@ if (HAS_LAYOUT) {{
   network.once('stabilizationIterationsDone', () => {{
     network.setOptions({{ physics: {{ enabled: false }} }});
   }});
+}}
+
+// ---------------------------------------------------------------------
+// Camada 4: semantic zoom / community drill-down. Double-click a community
+// meta-node to swap it for its real members (positioned via the per-
+// community local layout precomputed server-side in
+// `_precompute_community_layouts`, offset by the meta-node's own current
+// canvas position — zero client-side layout math, so this never risks the
+// hang the precomputed top-level layout was built to avoid in the first
+// place). Double-click any expanded real node to collapse its community
+// back down. Everything in this block is a no-op when HAS_DRILLDOWN is
+// false (every export except an aggregated `--node-limit` view).
+// ---------------------------------------------------------------------
+const HAS_DRILLDOWN = FULL_NODES.length > 0;
+
+const communityMembers = new Map();
+FULL_NODES.forEach(n => {{
+  if (!communityMembers.has(n.community)) communityMembers.set(n.community, []);
+  communityMembers.get(n.community).push(n);
+}});
+
+const metaNodeByCommunity = new Map();
+const metaNodeById = new Map();
+RAW_NODES.forEach(n => {{
+  if (n.is_meta) {{
+    metaNodeByCommunity.set(n.community, n);
+    metaNodeById.set(n.id, n);
+  }}
+}});
+
+const expandedCommunities = new Set();
+const activeRealNodeIds = new Set();
+
+// FACET_NODE_SOURCE / FACET_EDGE_SOURCE: the universe facets are computed
+// over. Per the agreed scope, facets always reflect the *whole* codebase
+// from the start (not just whatever's currently expanded on the canvas) —
+// see the FACETS block below, which reads from these instead of RAW_NODES /
+// RAW_EDGES directly whenever drill-down data is present.
+const FACET_NODE_SOURCE = HAS_DRILLDOWN ? FULL_NODES : RAW_NODES;
+const FACET_EDGE_SOURCE = HAS_DRILLDOWN ? FULL_EDGES : RAW_EDGES;
+
+// Precomputed once: the non-drilldown edge array, in the same {{_id, ...}}
+// shape activeEdgeArray() returns for the drilldown case, so refresh()'s
+// hot loop never has to branch on HAS_DRILLDOWN per item.
+const _plainEdgeItems = RAW_EDGES.map((e, i) => Object.assign({{ _id: i }}, e));
+
+function activeNodeArray() {{
+  if (!HAS_DRILLDOWN) return RAW_NODES;
+  const arr = RAW_NODES.filter(n => !(n.is_meta && expandedCommunities.has(n.community)));
+  expandedCommunities.forEach(cid => {{
+    (communityMembers.get(cid) || []).forEach(n => arr.push(n));
+  }});
+  return arr;
+}}
+
+function activeEdgeArray() {{
+  if (!HAS_DRILLDOWN) return _plainEdgeItems;
+  const arr = [];
+  RAW_EDGES.forEach((e, i) => {{
+    const fromMeta = metaNodeById.get(e.from);
+    const toMeta = metaNodeById.get(e.to);
+    const fromExpanded = fromMeta && expandedCommunities.has(fromMeta.community);
+    const toExpanded = toMeta && expandedCommunities.has(toMeta.community);
+    if (!fromExpanded && !toExpanded) arr.push(Object.assign({{ _id: i }}, e));
+  }});
+  FULL_EDGES.forEach((e, i) => {{
+    if (activeRealNodeIds.has(e.from) && activeRealNodeIds.has(e.to)) {{
+      arr.push(Object.assign({{ _id: 'full:' + i }}, e));
+    }}
+  }});
+  return arr;
+}}
+
+// Structural sync of edgesDS for the FULL_EDGES-derived portion only:
+// meta-level edges are already DataSet items from construction and only
+// ever need their `hidden` flag toggled (handled by refresh() below), but
+// a real edge between two just-expanded nodes doesn't exist in edgesDS yet
+// at all — DataSet.update() on a nonexistent id would create a bare item
+// missing `from`/`to`/color/etc, so it has to be add()ed explicitly the
+// first time, and remove()d once neither endpoint is active any more.
+function refreshDrilldownEdges() {{
+  const wantedIds = new Set();
+  FULL_EDGES.forEach((e, i) => {{
+    if (activeRealNodeIds.has(e.from) && activeRealNodeIds.has(e.to)) wantedIds.add('full:' + i);
+  }});
+  const currentIds = new Set(edgesDS.getIds().filter(id => typeof id === 'string' && id.startsWith('full:')));
+  const toRemove = [...currentIds].filter(id => !wantedIds.has(id));
+  if (toRemove.length) edgesDS.remove(toRemove);
+  const toAdd = [];
+  wantedIds.forEach(id => {{
+    if (currentIds.has(id)) return;
+    const e = FULL_EDGES[Number(id.slice(5))];
+    toAdd.push({{
+      id, from: e.from, to: e.to, label: '', title: e.title,
+      dashes: e.dashes, width: e.width, color: e.color,
+      arrows: {{ to: {{ enabled: true, scaleFactor: 0.5 }} }},
+    }});
+  }});
+  if (toAdd.length) edgesDS.add(toAdd);
+}}
+
+function expandCommunity(cid) {{
+  if (!HAS_DRILLDOWN || expandedCommunities.has(cid)) return;
+  const members = communityMembers.get(cid) || [];
+  if (!members.length) return;
+  const remainingCap = DRILLDOWN_NODE_CAP - activeRealNodeIds.size;
+  if (members.length > remainingCap) {{
+    showDrilldownWarning(`Expandir esta comunidade adicionaria ${{fmt(members.length)}} nós, acima do limite de ${{fmt(DRILLDOWN_NODE_CAP)}} nós simultâneos (${{fmt(activeRealNodeIds.size)}} já expandidos). Recolha outra comunidade antes de continuar.`);
+    return;
+  }}
+  const meta = metaNodeByCommunity.get(cid);
+  if (!meta) return;
+  const livePos = network.getPositions([meta.id])[meta.id] || {{ x: meta.x || 0, y: meta.y || 0 }};
+
+  nodesDS.add(members.map(n => ({{
+    id: n.id, label: n.label, color: n.color, size: n.size, font: n.font, title: n.title,
+    x: livePos.x + (n.x || 0), y: livePos.y + (n.y || 0),
+    _community: n.community, _community_name: n.community_name,
+    _source_file: n.source_file, _file_type: n.file_type, _kind: n.kind, _degree: n.degree,
+    _is_meta: false,
+  }})));
+  members.forEach(n => activeRealNodeIds.add(n.id));
+  nodesDS.remove(meta.id);
+  expandedCommunities.add(cid);
+
+  refreshDrilldownEdges();
+  prevVisibleNodes = null;
+  prevVisibleEdges = null;
+  refresh();
+  updateDrilldownStatus();
+}}
+
+function collapseCommunity(cid) {{
+  if (!expandedCommunities.has(cid)) return;
+  const members = communityMembers.get(cid) || [];
+  nodesDS.remove(members.map(n => n.id));
+  members.forEach(n => activeRealNodeIds.delete(n.id));
+  expandedCommunities.delete(cid);
+
+  const meta = metaNodeByCommunity.get(cid);
+  if (meta && !nodesDS.get(meta.id)) {{
+    nodesDS.add({{
+      id: meta.id, label: meta.label, color: meta.color, size: meta.size, font: meta.font, title: meta.title,
+      x: meta.x, y: meta.y,
+      _community: meta.community, _community_name: meta.community_name,
+      _source_file: meta.source_file, _file_type: meta.file_type, _kind: meta.kind, _degree: meta.degree,
+      _is_meta: true,
+    }});
+  }}
+
+  refreshDrilldownEdges();
+  prevVisibleNodes = null;
+  prevVisibleEdges = null;
+  refresh();
+  updateDrilldownStatus();
+}}
+
+network.on('doubleClick', params => {{
+  if (!HAS_DRILLDOWN || params.nodes.length !== 1) return;
+  const node = nodesDS.get(params.nodes[0]);
+  if (!node) return;
+  if (node._is_meta) {{
+    expandCommunity(node._community);
+  }} else if (activeRealNodeIds.has(node.id) && expandedCommunities.has(node._community)) {{
+    collapseCommunity(node._community);
+  }}
+}});
+
+const drilldownPanel = document.getElementById('drilldown-panel');
+const drilldownCountEl = document.getElementById('drilldown-count');
+if (HAS_DRILLDOWN) {{
+  drilldownPanel.style.display = 'flex';
+  document.getElementById('drilldown-collapse-all').addEventListener('click', () => {{
+    [...expandedCommunities].forEach(cid => collapseCommunity(cid));
+  }});
+  drilldownCountEl.textContent = `0 comunidades · 0/${{fmt(DRILLDOWN_NODE_CAP)}} nós`;
+}}
+function updateDrilldownStatus() {{
+  if (!HAS_DRILLDOWN) return;
+  drilldownCountEl.textContent = `${{fmt(expandedCommunities.size)}} comunidades · ${{fmt(activeRealNodeIds.size)}}/${{fmt(DRILLDOWN_NODE_CAP)}} nós`;
+}}
+
+let _drilldownWarningTimer = null;
+function showDrilldownWarning(msg) {{
+  const el = document.getElementById('drilldown-warning');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.display = 'block';
+  if (_drilldownWarningTimer) clearTimeout(_drilldownWarningTimer);
+  _drilldownWarningTimer = setTimeout(() => {{ el.style.display = 'none'; }}, 6000);
 }}
 
 function showInfo(nodeId) {{
@@ -412,7 +799,7 @@ searchInput.addEventListener('input', () => {{
   const q = searchInput.value.toLowerCase().trim();
   searchResults.innerHTML = '';
   if (!q) {{ searchResults.style.display = 'none'; return; }}
-  const matches = RAW_NODES.filter(n => n.label.toLowerCase().includes(q)).slice(0, 20);
+  const matches = activeNodeArray().filter(n => n.label.toLowerCase().includes(q)).slice(0, 20);
   if (!matches.length) {{ searchResults.style.display = 'none'; return; }}
   searchResults.style.display = 'block';
   matches.forEach(n => {{
@@ -460,10 +847,10 @@ function distinctCounts(values) {{
   return counts;
 }}
 
-const maxDegree = RAW_NODES.reduce((m, n) => Math.max(m, n.degree || 0), 0);
+const maxDegree = FACET_NODE_SOURCE.reduce((m, n) => Math.max(m, n.degree || 0), 0);
 
 const communityFacetMap = new Map();
-RAW_NODES.forEach(n => {{
+FACET_NODE_SOURCE.forEach(n => {{
   const cid = String(n.community);
   if (!communityFacetMap.has(cid)) {{
     communityFacetMap.set(cid, {{
@@ -521,12 +908,12 @@ function facetItemsFromKind(counts) {{
 const FACETS = [
   {{
     key: 'fileType', title: 'Node type', appliesTo: 'node',
-    items: facetItemsFrom(distinctCounts(RAW_NODES.map(n => n.file_type)), '(unknown)'),
+    items: facetItemsFrom(distinctCounts(FACET_NODE_SOURCE.map(n => n.file_type)), '(unknown)'),
     read: n => n.file_type == null ? '' : String(n.file_type),
   }},
   {{
     key: 'kind', title: 'Subtipo (VB6)', appliesTo: 'node',
-    items: facetItemsFromKind(distinctCounts(RAW_NODES.map(n => n.kind))),
+    items: facetItemsFromKind(distinctCounts(FACET_NODE_SOURCE.map(n => n.kind))),
     read: n => n.kind == null ? '' : String(n.kind),
   }},
   {{
@@ -536,12 +923,12 @@ const FACETS = [
   }},
   {{
     key: 'relation', title: 'Relation', appliesTo: 'edge',
-    items: facetItemsFrom(distinctCounts(RAW_EDGES.map(e => e.label)), '(unlabeled)'),
+    items: facetItemsFrom(distinctCounts(FACET_EDGE_SOURCE.map(e => e.label)), '(unlabeled)'),
     read: e => e.label == null ? '' : String(e.label),
   }},
   {{
     key: 'confidence', title: 'Confidence', appliesTo: 'edge',
-    items: facetItemsFrom(distinctCounts(RAW_EDGES.map(e => e.confidence)), '(unset)'),
+    items: facetItemsFrom(distinctCounts(FACET_EDGE_SOURCE.map(e => e.confidence)), '(unset)'),
     read: e => e.confidence == null ? '' : String(e.confidence),
   }},
 ];
@@ -553,32 +940,40 @@ function normalize(s) {{
   return String(s ?? '').toLowerCase();
 }}
 
-function computeVisible() {{
+// Shared by computeVisible() (over whatever's currently active/rendered)
+// and updateCommunityBadges() (over every member of a collapsed community,
+// rendered or not) — factored out so both always agree on what "matches
+// the current filters" means.
+function nodeMatchesFilters(n) {{
+  for (const f of FACETS) {{
+    if (f.appliesTo !== 'node' || !f.items.length) continue;
+    if (!filters.active[f.key].has(f.read(n))) return false;
+  }}
+  const deg = n.degree || 0;
+  if (deg < filters.degreeMin || deg > filters.degreeMax) return false;
   const term = normalize(filters.text).trim();
+  if (term) {{
+    const hay = normalize(`${{n.label}} ${{n.source_file || ''}} ${{n.community_name || ''}}`);
+    if (!hay.includes(term)) return false;
+  }}
+  return true;
+}}
+
+function computeVisible() {{
   const visibleNodes = new Set();
-  RAW_NODES.forEach(n => {{
-    for (const f of FACETS) {{
-      if (f.appliesTo !== 'node' || !f.items.length) continue;
-      if (!filters.active[f.key].has(f.read(n))) return;
-    }}
-    const deg = n.degree || 0;
-    if (deg < filters.degreeMin || deg > filters.degreeMax) return;
-    if (term) {{
-      const hay = normalize(`${{n.label}} ${{n.source_file || ''}} ${{n.community_name || ''}}`);
-      if (!hay.includes(term)) return;
-    }}
-    visibleNodes.add(n.id);
+  activeNodeArray().forEach(n => {{
+    if (nodeMatchesFilters(n)) visibleNodes.add(n.id);
   }});
 
   const visibleEdges = new Set();
   const connected = new Set();
-  RAW_EDGES.forEach((e, i) => {{
+  activeEdgeArray().forEach(e => {{
     for (const f of FACETS) {{
       if (f.appliesTo !== 'edge' || !f.items.length) continue;
       if (!filters.active[f.key].has(f.read(e))) return;
     }}
     if (!visibleNodes.has(e.from) || !visibleNodes.has(e.to)) return;
-    visibleEdges.add(i);
+    visibleEdges.add(e._id);
     connected.add(e.from);
     connected.add(e.to);
   }});
@@ -642,8 +1037,8 @@ function updateFacetCounts(visibleNodes, visibleEdges) {{
     const list = facetGroupsEl.querySelector(`[data-list="${{f.key}}"]`);
     if (!list) return;
     const visibleByValue = f.appliesTo === 'node'
-      ? distinctCounts(RAW_NODES.filter(n => visibleNodes.has(n.id)).map(f.read))
-      : distinctCounts(RAW_EDGES.filter((e, i) => visibleEdges.has(i)).map(f.read));
+      ? distinctCounts(FACET_NODE_SOURCE.filter(n => visibleNodes.has(n.id)).map(f.read))
+      : distinctCounts(FACET_EDGE_SOURCE.filter((e, i) => visibleEdges.has(HAS_DRILLDOWN ? ('full:' + i) : i)).map(f.read));
     list.innerHTML = '';
     f.items.forEach(it => {{
       const active = filters.active[f.key].has(it.value);
@@ -683,14 +1078,34 @@ function updateFacetCounts(visibleNodes, visibleEdges) {{
 let prevVisibleNodes = null;
 let prevVisibleEdges = null;
 
+function updateCommunityBadges() {{
+  if (!HAS_DRILLDOWN) return;
+  const showBadges = countActive() > 0;
+  const updates = [];
+  metaNodeByCommunity.forEach((meta, cid) => {{
+    if (expandedCommunities.has(cid) || !nodesDS.get(meta.id)) return;
+    const members = communityMembers.get(cid) || [];
+    let matchLabel = meta.label;
+    if (showBadges) {{
+      let match = 0;
+      members.forEach(n => {{ if (nodeMatchesFilters(n)) match++; }});
+      if (match !== members.length) matchLabel = `${{meta.label}} (${{fmt(match)}}/${{fmt(members.length)}})`;
+    }}
+    if (nodesDS.get(meta.id).label !== matchLabel) updates.push({{ id: meta.id, label: matchLabel }});
+  }});
+  if (updates.length) nodesDS.update(updates);
+}}
+
 function refresh() {{
   const {{ visibleNodes, visibleEdges }} = computeVisible();
+  const nodeItems = activeNodeArray();
+  const edgeItems = activeEdgeArray();
 
   if (prevVisibleNodes === null) {{
-    nodesDS.update(RAW_NODES.map(n => ({{ id: n.id, hidden: !visibleNodes.has(n.id) }})));
+    nodesDS.update(nodeItems.map(n => ({{ id: n.id, hidden: !visibleNodes.has(n.id) }})));
   }} else {{
     const changed = [];
-    RAW_NODES.forEach(n => {{
+    nodeItems.forEach(n => {{
       const now = visibleNodes.has(n.id);
       if (prevVisibleNodes.has(n.id) !== now) changed.push({{ id: n.id, hidden: !now }});
     }});
@@ -699,18 +1114,19 @@ function refresh() {{
   prevVisibleNodes = visibleNodes;
 
   if (prevVisibleEdges === null) {{
-    edgesDS.update(RAW_EDGES.map((e, i) => ({{ id: i, hidden: !visibleEdges.has(i) }})));
+    edgesDS.update(edgeItems.map(e => ({{ id: e._id, hidden: !visibleEdges.has(e._id) }})));
   }} else {{
     const changed = [];
-    RAW_EDGES.forEach((e, i) => {{
-      const now = visibleEdges.has(i);
-      if (prevVisibleEdges.has(i) !== now) changed.push({{ id: i, hidden: !now }});
+    edgeItems.forEach(e => {{
+      const now = visibleEdges.has(e._id);
+      if (prevVisibleEdges.has(e._id) !== now) changed.push({{ id: e._id, hidden: !now }});
     }});
     if (changed.length) edgesDS.update(changed);
   }}
   prevVisibleEdges = visibleEdges;
 
   updateFacetCounts(visibleNodes, visibleEdges);
+  updateCommunityBadges();
   const active = countActive();
   filtersBadge.textContent = String(active);
   filtersBadge.style.display = active > 0 ? 'inline-block' : 'none';
@@ -819,6 +1235,8 @@ def to_html(
     member_counts: dict[int, int] | None = None,
     node_limit: int | None = None,
     learning_overlay: dict | None = None,
+    full_graph: nx.Graph | None = None,
+    full_communities: dict[int, list[str]] | None = None,
 ) -> bool:
     """Generate an interactive vis.js HTML visualization of the graph.
 
@@ -848,7 +1266,18 @@ def to_html(
     based on community member counts rather than graph degree.
 
     If node_limit is set and the graph exceeds it, automatically builds an
-    aggregated community-level meta-graph instead of raising ValueError.
+    aggregated community-level meta-graph instead of raising ValueError. That
+    meta-graph render also embeds the *complete* original per-symbol graph
+    (`full_graph`/`full_communities`, threaded through automatically — not
+    meant to be passed by external callers) so the browser can drill down:
+    double-clicking a community meta-node swaps it for its real members,
+    positioned via a per-community local layout precomputed server-side
+    (`_precompute_community_layouts`) — never client-side, preserving the
+    "the page never hangs" guarantee. Facets are computed from this full
+    embedded dataset from the start (so e.g. every VB6 subtype value is
+    listed and filterable even before anything is expanded), and up to
+    `_DRILLDOWN_NODE_CAP` real nodes may be expanded onto the canvas at once,
+    across as many simultaneously-expanded communities as fit under that cap.
 
     Returns True when the output was written. Returns False when an aggregated
     view would contain fewer than two communities and is intentionally skipped.
@@ -863,7 +1292,7 @@ def to_html(
             node_to_community = {nid: cid for cid, members in communities.items() for nid in members}
             meta = _nx.Graph()
             for cid, members in communities.items():
-                meta.add_node(str(cid), label=(community_labels or {}).get(cid, f"Community {cid}"))
+                meta.add_node(str(cid), label=(community_labels or {}).get(cid, f"Community {cid}"), is_meta=True)
             edge_counts = _Counter()
             for u, v in G.edges():
                 cu, cv = node_to_community.get(u), node_to_community.get(v)
@@ -902,7 +1331,8 @@ def to_html(
                     })
                 meta.graph["hyperedges"] = remapped
             written = to_html(meta, meta_communities, output_path,
-                              community_labels=community_labels, member_counts=mc)
+                              community_labels=community_labels, member_counts=mc,
+                              full_graph=G, full_communities=communities)
             if not written:
                 return False
             print(f"graph.html written (aggregated: {meta.number_of_nodes()} community nodes, {meta.number_of_edges()} cross-community edges)")
@@ -913,6 +1343,10 @@ def to_html(
             f"(limit: {limit}). Use --no-viz, raise GRAPHIFY_VIZ_NODE_LIMIT, "
             f"or reduce input size."
         )
+
+    # Escape </script> sequences so embedded JSON cannot break out of the script tag
+    def _js_safe(obj) -> str:
+        return json.dumps(obj).replace("</", "<\\/")
 
     node_community = _node_community_map(communities)
     degree = dict(G.degree())
@@ -931,100 +1365,17 @@ def to_html(
             learning_overlay = _llo(Path(output_path))
         except Exception:
             learning_overlay = {}
-    # Status -> ring color. preferred=green, contested=amber. Tentative gets no
-    # ring (it's not yet trustworthy enough to highlight in the map).
-    _RING = {"preferred": "#22c55e", "contested": "#f59e0b"}
 
-    # Build nodes list for vis.js
-    vis_nodes = []
-    for node_id, data in G.nodes(data=True):
-        cid = node_community.get(node_id, 0)
-        color = COMMUNITY_COLORS[cid % len(COMMUNITY_COLORS)]
-        label = sanitize_label(data.get("label", node_id))
-        deg = degree.get(node_id, 1)
-        if member_counts:
-            mc = member_counts.get(cid, 1)
-            size = 10 + 30 * (mc / max_mc)
-            font_size = 12
-        else:
-            size = 10 + 30 * (deg / max_deg)
-            # Only show label for high-degree nodes by default; others show on hover
-            font_size = 12 if deg >= max_deg * 0.15 else 0
-        node = {
-            "id": node_id,
-            "label": label,
-            "color": {"background": color, "border": color, "highlight": {"background": "#ffffff", "border": color}},
-            "size": round(size, 1),
-            "font": {"size": font_size, "color": "#ffffff"},
-            "title": _html.escape(label),
-            "community": cid,
-            "community_name": sanitize_label((community_labels or {}).get(cid, f"Community {cid}")),
-            "source_file": sanitize_label(str(data.get("source_file") or "")),
-            "file_type": data.get("file_type", ""),
-            "kind": sanitize_label(str((data.get("metadata") or {}).get("kind", "") or "")),
-            "degree": deg,
-        }
-        if positions is not None and node_id in positions:
-            # _precompute_layout already returns final canvas-unit coordinates
-            # (it applies _LAYOUT_SCALE itself for spring_layout; _grid_layout
-            # computes its own final units directly) — no scaling here.
-            px, py = positions[node_id]
-            node["x"] = round(float(px), 1)
-            node["y"] = round(float(py), 1)
-        # Conditional learning fields — only present for annotated nodes, so
-        # un-annotated output keeps the exact pre-feature node dict shape.
-        entry = learning_overlay.get(str(node_id)) if learning_overlay else None
-        if entry:
-            status = sanitize_label(str(entry.get("status", "")))
-            stale = bool(entry.get("stale"))
-            node["learning_status"] = status
-            node["learning_stale"] = stale
-            ring = _RING.get(status)
-            if ring:
-                # Status-colored ring via the border; stale => desaturated +
-                # dashed (vis.js supports per-node `shapeProperties.borderDashes`).
-                if stale:
-                    ring = "#9ca3af"
-                    node["shapeProperties"] = {"borderDashes": [4, 4]}
-                node["borderWidth"] = 3
-                node["color"] = {
-                    "background": color, "border": ring,
-                    "highlight": {"background": "#ffffff", "border": ring},
-                }
-            # Lesson line appended to the hover title.
-            if status == "contested":
-                lesson = f"Lesson: contested (useful {entry.get('uses', 0)} / dead-end {entry.get('neg', 0)})"
-            elif status == "preferred":
-                lesson = f"Lesson: preferred source ({entry.get('uses', 0)} useful, score={entry.get('score', 0)})"
-            else:
-                lesson = f"Lesson: {status} ({entry.get('uses', 0)} useful)"
-            if stale:
-                lesson += " [code changed — re-verify]"
-            node["title"] = _html.escape(label) + "\n" + _html.escape(sanitize_label(lesson))
-        vis_nodes.append(node)
+    vis_nodes = _build_vis_nodes(
+        G, node_community, degree, max_deg, community_labels,
+        member_counts, max_mc, positions, learning_overlay,
+    )
 
     # Build edges list. Restore original edge direction from _src/_tgt
     # (stashed by build.py for exactly this reason): undirected NetworkX
     # canonicalizes endpoint order, which would otherwise flip the arrow
     # for `calls` and `rationale_for` in the rendered graph (#563).
-    vis_edges = []
-    for u, v, data in G.edges(data=True):
-        confidence = data.get("confidence", "EXTRACTED")
-        relation = data.get("relation", "")
-        true_src = data.get("_src", u)
-        true_tgt = data.get("_tgt", v)
-        base_opacity = 0.7 if confidence == "EXTRACTED" else 0.35
-        hub_degree = max(degree.get(true_src, 0), degree.get(true_tgt, 0))
-        vis_edges.append({
-            "from": true_src,
-            "to": true_tgt,
-            "label": relation,
-            "title": _html.escape(f"{relation} [{confidence}]"),
-            "dashes": confidence != "EXTRACTED",
-            "width": 2 if confidence == "EXTRACTED" else 1,
-            "color": {"opacity": round(_hub_alpha(base_opacity, hub_degree), 3)},
-            "confidence": confidence,
-        })
+    vis_edges = _build_vis_edges(G, degree)
 
     # Build community legend data
     legend_data = []
@@ -1034,16 +1385,30 @@ def to_html(
         n = member_counts.get(cid, len(communities.get(cid, []))) if member_counts else len(communities.get(cid, []))
         legend_data.append({"cid": cid, "color": color, "label": lbl, "count": n})
 
-    # Escape </script> sequences so embedded JSON cannot break out of the script tag
-    def _js_safe(obj) -> str:
-        return json.dumps(obj).replace("</", "<\\/")
-
     nodes_json = _js_safe(vis_nodes)
     edges_json = _js_safe(vis_edges)
     legend_json = _js_safe(legend_data)
     hyperedges_json = _js_safe(getattr(G, "graph", {}).get("hyperedges", []))
     title = _html.escape(sanitize_label(_html_document_title(output_path)))
     stats = f"{G.number_of_nodes()} nodes &middot; {G.number_of_edges()} edges &middot; {len(communities)} communities"
+
+    # Camada 4: embed the complete original per-symbol graph alongside the
+    # aggregated meta-graph, so the browser can drill down into any
+    # community without a server round-trip. See `to_html()`'s docstring.
+    full_nodes_json = "[]"
+    full_edges_json = "[]"
+    if full_graph is not None and full_communities is not None and full_graph.number_of_nodes() > 0:
+        full_node_community = _node_community_map(full_communities)
+        full_degree = dict(full_graph.degree())
+        full_max_deg = max(full_degree.values(), default=1) or 1
+        full_positions = _precompute_community_layouts(full_graph, full_communities)
+        full_vis_nodes = _build_vis_nodes(
+            full_graph, full_node_community, full_degree, full_max_deg,
+            community_labels, None, 1, full_positions, learning_overlay,
+        )
+        full_vis_edges = _build_vis_edges(full_graph, full_degree)
+        full_nodes_json = _js_safe(full_vis_nodes)
+        full_edges_json = _js_safe(full_vis_edges)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1083,10 +1448,15 @@ def to_html(
       </div>
     </div>
     <label class="toggle-row"><input type="checkbox" id="hide-isolated-cb" class="chk"> Hide isolated nodes</label>
+    <div class="facet-section" id="drilldown-panel" style="display:none">
+      <div class="facet-section-title"><span>Drill-down</span><span id="drilldown-count">0</span></div>
+      <button type="button" id="drilldown-collapse-all" class="filters-clear" style="align-self:flex-start">Recolher tudo</button>
+      <div id="drilldown-warning" style="display:none;color:#f59e0b;font-size:11px;line-height:1.4;"></div>
+    </div>
   </div>
   <div id="stats">{stats}</div>
 </div>
-{_html_script(nodes_json, edges_json, legend_json)}
+{_html_script(nodes_json, edges_json, legend_json, full_nodes_json, full_edges_json, _DRILLDOWN_NODE_CAP)}
 {_hyperedge_script(hyperedges_json)}
 </body>
 </html>"""
