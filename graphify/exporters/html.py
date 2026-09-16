@@ -21,7 +21,7 @@ _HTML_STALE_MARKER = ".graph.html.stale"
 # 1000 ~5.5s, 2000 ~12s, 3000 ~23s — clearly still superlinear. 1200 is
 # picked to keep the one-time cost added to `graphify update`/`export html`
 # in the single-digit seconds. Above it (or if spring_layout itself raises),
-# `_precompute_layout` falls back to `_grid_layout` instead — see that
+# `_precompute_layout` falls back to `_radial_layout` instead — see that
 # function for why a cheap fallback beats leaving physics enabled.
 _LAYOUT_MAX_NODES = 1_200
 # Spread of the organic (spring_layout) precomputed layout, in vis-network
@@ -29,16 +29,16 @@ _LAYOUT_MAX_NODES = 1_200
 # this scale keeps spacing in the same rough order of magnitude vis-network's
 # own ForceAtlas2 physics used to produce (springLength=120 across thousands
 # of nodes), so the static layout doesn't look cramped or absurdly sparse
-# relative to node/label size. `_grid_layout` does its own, size-aware
+# relative to node/label size. `_radial_layout` does its own, size-aware
 # spacing instead of using this constant — see its docstring for why.
 _LAYOUT_SCALE = 800.0
 # Node radius is always in [10, 40] canvas px by construction — both size
 # formulas in to_html()'s node loop (`10 + 30 * deg/max_deg` and, for the
 # aggregated view, `10 + 30 * mc/max_mc`) are ratios against their own
 # maximum, so the single largest node in *any* graph is always exactly 40.
-# `_grid_layout` uses this ceiling — not the actual per-node size, which
-# would need a second pass — to size cells so that even two adjacent
-# maximum-size nodes never touch.
+# `_radial_layout` uses this ceiling — not the actual per-node size, which
+# would need a second pass — to size its spiral spacing so that even two
+# adjacent maximum-size nodes never touch.
 _MAX_NODE_RADIUS = 40.0
 # Spread of each *per-community* local layout (Camada 4 drill-down), in the
 # same canvas-unit space as _LAYOUT_SCALE but deliberately smaller: a local
@@ -57,43 +57,78 @@ _LOCAL_LAYOUT_SCALE = 300.0
 _DRILLDOWN_NODE_CAP = 1_200
 
 
-def _grid_layout(G: nx.Graph) -> dict:
+def _radial_layout(G: nx.Graph) -> dict:
     """Deterministic O(n) fallback layout: no simulation, no iteration.
 
     Used above `_LAYOUT_MAX_NODES` (or if spring_layout itself raises)
     instead of leaving vis-network's client-side ForceAtlas2 physics
-    enabled. That was the original tier-1 fallback, on the assumption it
-    reproduced pre-existing behavior harmlessly — but it doesn't scale down
-    gracefully, it hangs: reproduced against a real 19,706-node/23,177-edge
-    graphify export, the browser tab never became responsive again within
-    100+ seconds of the page's `load` event firing. A grid carries none of
-    spring_layout's topology-aware clustering (nodes don't group visually by
-    community/connectivity — see the graph.html docstring's Performance note
-    for the tradeoff), but it's O(n), so the page loads in seconds and the
-    filters panel stays fully usable, which is what actually matters once a
-    graph is this large: finding and filtering specific nodes, not eyeballing
-    an organic layout of tens of thousands of dots.
+    enabled, which — reproduced against a real 19,706-node/23,177-edge
+    graphify export — hangs the tab outright rather than just running slow
+    (the browser tab never became responsive again within 100+ seconds of
+    the page's `load` event firing).
+
+    Arranges nodes on a sunflower/phyllotaxis spiral (radius grows with
+    sqrt(index), angle advances by the golden angle each step — the same
+    trick that packs sunflower seeds or camera-lens elements with no visible
+    seams) instead of a rectangular grid: an early version of this fallback
+    used literal rows and columns, which is O(n) and never overlaps but
+    reads as a dense rectangular block with none of spring_layout's organic,
+    roughly-circular silhouette. The spiral keeps the O(n)/no-iteration
+    guarantee while looking much closer to what spring_layout would have
+    produced. It carries none of spring_layout's topology-aware clustering
+    (nodes don't group visually by community/connectivity — see the
+    graph.html docstring's Performance note for the tradeoff), but that's
+    still the right trade once a graph is this large: finding and filtering
+    specific nodes matters more than eyeballing organic clustering among
+    tens of thousands of dots.
+
+    Nodes with no edges at all — nothing to relate them to any neighbor's
+    position — are sorted to the end of the spiral and given an extra
+    outward radius push past the connected cluster's own outer edge, so
+    they form a sparser ring further out: still panned-to and clickable,
+    but visually set apart from the connected mass at the center instead of
+    interleaved throughout it.
 
     Unlike spring_layout, this returns *final* canvas-unit coordinates
-    directly (the caller must not re-apply `_LAYOUT_SCALE`) — cell spacing
+    directly (the caller must not re-apply `_LAYOUT_SCALE`) — point spacing
     is derived from `_MAX_NODE_RADIUS`, not a fixed total canvas size, so
-    the very first version of this fallback packed ~19.7k nodes (20-80px
-    diameter each) into an 11px cell spacing, guaranteeing massive overlap
-    regardless of node count. Spacing cells at the node-size ceiling instead
-    means the overall canvas grows with node count — a bigger graph needs
-    more panning to see edge to edge — rather than compressing everything
-    into the same fixed span no matter how many nodes it holds, in exchange
-    for every node actually being visible.
+    the canvas grows with node count instead of compressing everything into
+    the same fixed span no matter how many nodes it holds, in exchange for
+    every node actually being visible.
     """
     import math
     nodes = list(G.nodes())
     n = len(nodes)
+    if n == 0:
+        return {}
+    degree = dict(G.degree())
+    connected = [nd for nd in nodes if degree.get(nd, 0) > 0]
+    isolated = [nd for nd in nodes if degree.get(nd, 0) == 0]
+
     cell = _MAX_NODE_RADIUS * 2.25  # diameter + a small margin, canvas px
-    cols = max(1, math.ceil(math.sqrt(n)))
-    positions = {}
-    for i, node in enumerate(nodes):
-        row, col = divmod(i, cols)
-        positions[node] = (col * cell, row * cell)
+    # Phyllotaxis packing: point i sits at radius c*sqrt(i), so the disc
+    # covered by the first i points grows linearly with i (area ~ pi*c^2*i).
+    # Solving for one point's share of that area to be at least `cell`'s
+    # worth of room — with a safety margin, since the golden-angle spiral is
+    # an even *average* density rather than an exact circle-packing — keeps
+    # neighbors from touching in practice.
+    c = (cell / math.sqrt(math.pi)) * 1.15
+    golden_angle = math.pi * (3.0 - math.sqrt(5.0))
+
+    positions: dict = {}
+    for i, node in enumerate(connected):
+        r = c * math.sqrt(i + 1)
+        theta = i * golden_angle
+        positions[node] = (r * math.cos(theta), r * math.sin(theta))
+
+    if isolated:
+        boundary_r = c * math.sqrt(len(connected)) if connected else 0.0
+        gap = cell * 3  # visible separation from the connected cluster
+        for j, node in enumerate(isolated):
+            r = boundary_r + gap + c * math.sqrt(j + 1)
+            theta = (len(connected) + j) * golden_angle
+            positions[node] = (r * math.cos(theta), r * math.sin(theta))
+
     return positions
 
 
@@ -103,19 +138,19 @@ def _precompute_layout(G: nx.Graph) -> dict | None:
     Letting vis-network run its ForceAtlas2 physics simulation client-side
     from a random start is the dominant cost on first paint for any graph
     with more than a couple thousand nodes — and past roughly `_LAYOUT_MAX_NODES`
-    it doesn't just cost more, it hangs the tab outright (see `_grid_layout`).
+    it doesn't just cost more, it hangs the tab outright (see `_radial_layout`).
     Precomputing positions here and shipping them in the node data lets the
     browser skip physics entirely (see the HAS_LAYOUT flag in `_html_script()`).
 
     Prefers the organic spring_layout up to `_LAYOUT_MAX_NODES` nodes, falls
-    back to the cheap `_grid_layout` above that (or if spring_layout itself
+    back to the cheap `_radial_layout` above that (or if spring_layout itself
     raises — e.g. missing scipy, a degenerate/disconnected graph shape).
     Returns None only for an empty graph, in which case there's nothing to
     lay out and the (harmless, since there are no nodes) physics-driven JS
     path runs instead.
 
     Always returns *final* canvas-unit coordinates — `_LAYOUT_SCALE` is
-    applied here for the spring_layout branch; `_grid_layout` computes its
+    applied here for the spring_layout branch; `_radial_layout` computes its
     own final units directly. Callers must not scale the result further.
     """
     n = G.number_of_nodes()
@@ -127,7 +162,7 @@ def _precompute_layout(G: nx.Graph) -> dict | None:
             return {node: (x * _LAYOUT_SCALE, y * _LAYOUT_SCALE) for node, (x, y) in raw.items()}
         except Exception:
             pass
-    return _grid_layout(G)
+    return _radial_layout(G)
 
 
 def _precompute_community_layouts(G: nx.Graph, communities: dict[int, list[str]]) -> dict:
@@ -144,11 +179,12 @@ def _precompute_community_layouts(G: nx.Graph, communities: dict[int, list[str]]
 
     Every community observed in practice (pd-desenv's largest is well under
     400 members) is comfortably inside `_LAYOUT_MAX_NODES`, so the
-    spring_layout call here is always fast — but a defensive grid fallback
-    still applies per-community (mirroring `_precompute_layout`'s own
-    fallback), in case some other codebase produces one outsized community.
-    Single-node communities are skipped: nothing to lay out relative to
-    (the sole member simply sits at the community's own center, offset 0).
+    spring_layout call here is always fast — but a defensive spiral fallback
+    (`_radial_layout`, already zero-centered by construction) still applies
+    per-community, in case some other codebase produces one outsized
+    community. Single-node communities are skipped: nothing to lay out
+    relative to (the sole member simply sits at the community's own center,
+    offset 0).
 
     Returns *local*, not-yet-offset canvas-unit coordinates, keyed by node
     id, for every node that belongs to a community with 2+ members.
@@ -167,12 +203,7 @@ def _precompute_community_layouts(G: nx.Graph, communities: dict[int, list[str]]
                 continue
             except Exception:
                 pass
-        grid = _grid_layout(sub)
-        if grid:
-            cx = sum(p[0] for p in grid.values()) / len(grid)
-            cy = sum(p[1] for p in grid.values()) / len(grid)
-            for node, (x, y) in grid.items():
-                positions[node] = (x - cx, y - cy)
+        positions.update(_radial_layout(sub))
     return positions
 
 
@@ -477,8 +508,8 @@ function esc(s) {{
 // entirely instead of re-simulating from a random start on every page load —
 // this is the dominant cost on first paint for large graphs, and past a few
 // thousand nodes it doesn't just cost more, it hangs the tab outright (a
-// grid layout is the fallback there, not physics — see _grid_layout() in
-// html.py). HAS_LAYOUT is only ever false for an empty graph, where there
+// spiral layout is the fallback there, not physics — see _radial_layout()
+// in html.py). HAS_LAYOUT is only ever false for an empty graph, where there
 // are no nodes for physics to hang on anyway.
 const HAS_LAYOUT = RAW_NODES.length > 0 && RAW_NODES.every(n => typeof n.x === 'number' && typeof n.y === 'number');
 
@@ -1252,10 +1283,13 @@ def to_html(
     simulation, which — past roughly a couple thousand nodes — doesn't just
     cost more, it hangs the tab outright (confirmed against a real ~20k-node
     export). Up to `_LAYOUT_MAX_NODES` this is an organic spring_layout;
-    above it, a cheap O(n) grid (`_grid_layout`) that carries no topological
-    meaning (nodes don't cluster visually by community) but keeps the page
-    loading in seconds and the filters panel fully usable — which is what
-    matters once a graph is too large to eyeball anyway. Edges touching
+    above it, a cheap O(n) sunflower-spiral fallback (`_radial_layout`) that
+    carries no topological meaning (nodes don't cluster visually by
+    community) but keeps a roughly circular silhouette — with unconnected
+    nodes pushed out to their own ring rather than interleaved throughout —
+    while keeping the page loading in seconds and the filters panel fully
+    usable, which is what matters once a graph is too large to eyeball
+    anyway. Edges touching
     high-degree hub nodes get their opacity dampened (`_hub_alpha`) to
     reduce visual overdraw; and the client-side filter panel updates the
     vis.js DataSets incrementally (only nodes/edges whose visibility
