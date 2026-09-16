@@ -13,6 +13,65 @@ from graphify.security import sanitize_label
 
 MAX_NODES_FOR_VIZ = 5_000
 _HTML_STALE_MARKER = ".graph.html.stale"
+# Server-side layout precompute (perf tier 1) cutoff, in node count.
+# networkx's spring_layout is *not* the O(n) win it might look like: for
+# len(G) >= 500 it switches to its scipy-backed "energy" method (raises
+# ImportError without scipy — caught below, safe no-op), and that method
+# still scales badly in practice. Measured on this machine: 500 nodes ~2s,
+# 1000 ~5.5s, 2000 ~12s, 3000 ~23s — clearly still superlinear, and a
+# 19k-node graph (graphify's own default aggregation kicks in well before
+# that, at 5k) doesn't finish in anything close to reasonable time. 1200 is
+# picked to keep the one-time cost added to `graphify update`/`export html`
+# in the single-digit seconds. Above it, precompute is skipped outright
+# (not attempted-then-aborted) rather than risk a multi-minute hang — the
+# browser falls back to running physics itself, i.e. today's behavior, not
+# a regression. See `_precompute_layout()`.
+_LAYOUT_MAX_NODES = 1_200
+# Spread of the precomputed layout in vis-network canvas units. spring_layout
+# returns coordinates roughly within [-1, 1]; this scale keeps spacing in the
+# same rough order of magnitude vis-network's own ForceAtlas2 physics used to
+# produce (springLength=120 across thousands of nodes), so the static layout
+# doesn't look cramped or absurdly sparse relative to node/label size.
+_LAYOUT_SCALE = 800.0
+
+
+def _precompute_layout(G: nx.Graph) -> dict | None:
+    """Best-effort server-side node layout, computed once at export time.
+
+    Letting vis-network run its ForceAtlas2 physics simulation client-side
+    from a random start is the dominant cost on first paint for any graph
+    with more than a couple thousand nodes. Precomputing positions here and
+    shipping them in the node data lets the browser skip physics entirely
+    (see the HAS_LAYOUT flag in `_html_script()`).
+
+    Returns None (and the browser falls back to running physics as before —
+    not a regression) when the graph is empty, above `_LAYOUT_MAX_NODES`
+    (see its comment for why that cap exists), or when layout computation
+    raises for any other reason (missing scipy, a degenerate/disconnected
+    graph shape, etc.) — deliberately broad, since a failure here should
+    never be able to break `graphify update`/`export html` itself.
+    """
+    n = G.number_of_nodes()
+    if n == 0 or n > _LAYOUT_MAX_NODES:
+        return None
+    try:
+        return nx.spring_layout(G, seed=42)
+    except Exception:
+        return None
+
+
+def _hub_alpha(base: float, hub_degree: int) -> float:
+    """Dampen edge opacity for edges touching a high-degree hub node.
+
+    Ported from grafo-explorer's `alfaPorGrau`: full opacity up to degree 6,
+    decaying by sqrt(degree) beyond that, floored so hub fan-out edges fade
+    rather than either vanishing or visually overwhelming the render. This is
+    a static per-edge value computed once here at export time — no added
+    client-side cost, unlike a zoom-driven level-of-detail system would be.
+    """
+    import math
+    return max(0.15, base * min(1.0, math.sqrt(6.0 / max(hub_degree, 6))))
+
 
 def _viz_node_limit() -> int:
     """Return the effective viz node limit, honoring GRAPHIFY_VIZ_NODE_LIMIT env var.
@@ -162,10 +221,19 @@ function esc(s) {{
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }}
 
+// Server-precomputed layout (see _precompute_layout() in html.py): when every
+// node carries x/y, skip vis-network's client-side ForceAtlas2 physics
+// entirely instead of re-simulating from a random start on every page load —
+// this is the dominant cost on first paint for large graphs. Falls back to
+// the old physics-driven behavior (HAS_LAYOUT = false) whenever the export
+// skipped precompute (empty graph, or above _LAYOUT_MAX_NODES).
+const HAS_LAYOUT = RAW_NODES.length > 0 && RAW_NODES.every(n => typeof n.x === 'number' && typeof n.y === 'number');
+
 // Build vis datasets
 const nodesDS = new vis.DataSet(RAW_NODES.map(n => ({{
   id: n.id, label: n.label, color: n.color, size: n.size,
   font: n.font, title: n.title,
+  ...(HAS_LAYOUT ? {{ x: n.x, y: n.y }} : {{}}),
   _community: n.community, _community_name: n.community_name,
   _source_file: n.source_file, _file_type: n.file_type, _kind: n.kind, _degree: n.degree,
 }})));
@@ -183,7 +251,7 @@ const edgesDS = new vis.DataSet(RAW_EDGES.map((e, i) => ({{
 const container = document.getElementById('graph');
 const network = new vis.Network(container, {{ nodes: nodesDS, edges: edgesDS }}, {{
   physics: {{
-    enabled: true,
+    enabled: !HAS_LAYOUT,
     solver: 'forceAtlas2Based',
     forceAtlas2Based: {{
       gravitationalConstant: -60,
@@ -206,9 +274,17 @@ const network = new vis.Network(container, {{ nodes: nodesDS, edges: edgesDS }},
   edges: {{ smooth: {{ type: 'continuous', roundness: 0.2 }}, selectionWidth: 3 }},
 }});
 
-network.once('stabilizationIterationsDone', () => {{
-  network.setOptions({{ physics: {{ enabled: false }} }});
-}});
+if (HAS_LAYOUT) {{
+  // Physics never runs, so nothing else fits the camera to the precomputed
+  // positions — do it once explicitly (mirrors what stabilization: {{fit: true}}
+  // gives the physics-driven path below). Positions are already known at
+  // construction time, so this can happen immediately, no event wait needed.
+  network.fit({{ animation: false }});
+}} else {{
+  network.once('stabilizationIterationsDone', () => {{
+    network.setOptions({{ physics: {{ enabled: false }} }});
+  }});
+}}
 
 function showInfo(nodeId) {{
   const n = nodesDS.get(nodeId);
@@ -538,10 +614,45 @@ function updateFacetCounts(visibleNodes, visibleEdges) {{
   }});
 }}
 
+// Previous visible sets, so refresh() below can send vis-network's DataSet
+// only the nodes/edges whose hidden state actually flipped instead of
+// rewriting every item on every filter click. DataSet.update() does real
+// bookkeeping per item (change events, subscriber notification, redraw
+// scheduling) — that per-item cost, multiplied by thousands of unchanged
+// items on every click, is what made filtering feel sluggish on large
+// graphs, not the plain array iteration used to compute the diff below.
+// null is the "never run yet" sentinel forcing one full initial pass, since
+// DataSet items have no `hidden` field at all until first set.
+let prevVisibleNodes = null;
+let prevVisibleEdges = null;
+
 function refresh() {{
   const {{ visibleNodes, visibleEdges }} = computeVisible();
-  nodesDS.update(RAW_NODES.map(n => ({{ id: n.id, hidden: !visibleNodes.has(n.id) }})));
-  edgesDS.update(RAW_EDGES.map((e, i) => ({{ id: i, hidden: !visibleEdges.has(i) }})));
+
+  if (prevVisibleNodes === null) {{
+    nodesDS.update(RAW_NODES.map(n => ({{ id: n.id, hidden: !visibleNodes.has(n.id) }})));
+  }} else {{
+    const changed = [];
+    RAW_NODES.forEach(n => {{
+      const now = visibleNodes.has(n.id);
+      if (prevVisibleNodes.has(n.id) !== now) changed.push({{ id: n.id, hidden: !now }});
+    }});
+    if (changed.length) nodesDS.update(changed);
+  }}
+  prevVisibleNodes = visibleNodes;
+
+  if (prevVisibleEdges === null) {{
+    edgesDS.update(RAW_EDGES.map((e, i) => ({{ id: i, hidden: !visibleEdges.has(i) }})));
+  }} else {{
+    const changed = [];
+    RAW_EDGES.forEach((e, i) => {{
+      const now = visibleEdges.has(i);
+      if (prevVisibleEdges.has(i) !== now) changed.push({{ id: i, hidden: !now }});
+    }});
+    if (changed.length) edgesDS.update(changed);
+  }}
+  prevVisibleEdges = visibleEdges;
+
   updateFacetCounts(visibleNodes, visibleEdges);
   const active = countActive();
   filtersBadge.textContent = String(active);
@@ -552,9 +663,14 @@ function refresh() {{
 renderFacetGroups();
 
 const facetTextInput = document.getElementById('facet-text');
+// Debounced: computeVisible() + the facet-count recompute are O(nodes+edges),
+// so on a large graph re-running that on every keystroke (vs. once ~200ms
+// after typing pauses) is the difference between smooth and janky typing.
+let facetTextDebounce = null;
 facetTextInput.addEventListener('input', () => {{
   filters.text = facetTextInput.value;
-  refresh();
+  if (facetTextDebounce) clearTimeout(facetTextDebounce);
+  facetTextDebounce = setTimeout(refresh, 200);
 }});
 
 const degreeMinInput = document.getElementById('degree-min');
@@ -651,9 +767,19 @@ def to_html(
 
     Features: node size by degree, click-to-inspect panel, search box,
     physics clustering by community, confidence-styled edges, and a
-    facet-based filters panel (node type, community, relation, confidence,
-    degree range, text quick-filter, hide-isolated) with live visible/total
-    counts per facet value. Raises ValueError if graph exceeds MAX_NODES_FOR_VIZ.
+    facet-based filters panel (node type, VB6 subtype, community, relation,
+    confidence, degree range, text quick-filter, hide-isolated) with live
+    visible/total counts per facet value. Raises ValueError if graph exceeds
+    MAX_NODES_FOR_VIZ.
+
+    Performance: node positions are precomputed server-side when feasible
+    (`_precompute_layout`) so the browser can skip its ForceAtlas2 physics
+    simulation entirely instead of re-running it from scratch on every page
+    load; edges touching high-degree hub nodes get their opacity dampened
+    (`_hub_alpha`) to reduce visual overdraw; and the client-side filter
+    panel updates the vis.js DataSets incrementally (only nodes/edges whose
+    visibility actually changed) with a debounced text filter, keeping
+    interaction responsive on graphs with thousands of nodes.
 
     If member_counts is provided (aggregated community view), node sizes are
     based on community member counts rather than graph degree.
@@ -729,6 +855,7 @@ def to_html(
     degree = dict(G.degree())
     max_deg = max(degree.values(), default=1) or 1
     max_mc = (max(member_counts.values(), default=1) or 1) if member_counts else 1
+    positions = _precompute_layout(G)
 
     # Work-memory overlay (derived sidecar). When not passed explicitly, load it
     # best-effort from the sibling .graphify_learning.json next to the output
@@ -774,6 +901,10 @@ def to_html(
             "kind": sanitize_label(str((data.get("metadata") or {}).get("kind", "") or "")),
             "degree": deg,
         }
+        if positions is not None and node_id in positions:
+            px, py = positions[node_id]
+            node["x"] = round(float(px) * _LAYOUT_SCALE, 1)
+            node["y"] = round(float(py) * _LAYOUT_SCALE, 1)
         # Conditional learning fields — only present for annotated nodes, so
         # un-annotated output keeps the exact pre-feature node dict shape.
         entry = learning_overlay.get(str(node_id)) if learning_overlay else None
@@ -816,6 +947,8 @@ def to_html(
         relation = data.get("relation", "")
         true_src = data.get("_src", u)
         true_tgt = data.get("_tgt", v)
+        base_opacity = 0.7 if confidence == "EXTRACTED" else 0.35
+        hub_degree = max(degree.get(true_src, 0), degree.get(true_tgt, 0))
         vis_edges.append({
             "from": true_src,
             "to": true_tgt,
@@ -823,7 +956,7 @@ def to_html(
             "title": _html.escape(f"{relation} [{confidence}]"),
             "dashes": confidence != "EXTRACTED",
             "width": 2 if confidence == "EXTRACTED" else 1,
-            "color": {"opacity": 0.7 if confidence == "EXTRACTED" else 0.35},
+            "color": {"opacity": round(_hub_alpha(base_opacity, hub_degree), 3)},
             "confidence": confidence,
         })
 
