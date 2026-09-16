@@ -13,26 +13,53 @@ from graphify.security import sanitize_label
 
 MAX_NODES_FOR_VIZ = 5_000
 _HTML_STALE_MARKER = ".graph.html.stale"
-# Server-side layout precompute (perf tier 1) cutoff, in node count.
-# networkx's spring_layout is *not* the O(n) win it might look like: for
+# Cutoff, in node count, for the *organic* server-side layout (spring_layout).
+# networkx's spring_layout is not the O(n) win it might look like: for
 # len(G) >= 500 it switches to its scipy-backed "energy" method (raises
 # ImportError without scipy — caught below, safe no-op), and that method
 # still scales badly in practice. Measured on this machine: 500 nodes ~2s,
-# 1000 ~5.5s, 2000 ~12s, 3000 ~23s — clearly still superlinear, and a
-# 19k-node graph (graphify's own default aggregation kicks in well before
-# that, at 5k) doesn't finish in anything close to reasonable time. 1200 is
+# 1000 ~5.5s, 2000 ~12s, 3000 ~23s — clearly still superlinear. 1200 is
 # picked to keep the one-time cost added to `graphify update`/`export html`
-# in the single-digit seconds. Above it, precompute is skipped outright
-# (not attempted-then-aborted) rather than risk a multi-minute hang — the
-# browser falls back to running physics itself, i.e. today's behavior, not
-# a regression. See `_precompute_layout()`.
+# in the single-digit seconds. Above it (or if spring_layout itself raises),
+# `_precompute_layout` falls back to `_grid_layout` instead — see that
+# function for why a cheap fallback beats leaving physics enabled.
 _LAYOUT_MAX_NODES = 1_200
-# Spread of the precomputed layout in vis-network canvas units. spring_layout
-# returns coordinates roughly within [-1, 1]; this scale keeps spacing in the
-# same rough order of magnitude vis-network's own ForceAtlas2 physics used to
-# produce (springLength=120 across thousands of nodes), so the static layout
-# doesn't look cramped or absurdly sparse relative to node/label size.
+# Spread of the precomputed layout in vis-network canvas units. Both
+# spring_layout and _grid_layout return coordinates roughly within [-1, 1];
+# this scale keeps spacing in the same rough order of magnitude vis-network's
+# own ForceAtlas2 physics used to produce (springLength=120 across thousands
+# of nodes), so the static layout doesn't look cramped or absurdly sparse
+# relative to node/label size.
 _LAYOUT_SCALE = 800.0
+
+
+def _grid_layout(G: nx.Graph) -> dict:
+    """Deterministic O(n) fallback layout: no simulation, no iteration.
+
+    Used above `_LAYOUT_MAX_NODES` (or if spring_layout itself raises)
+    instead of leaving vis-network's client-side ForceAtlas2 physics
+    enabled. That was the original tier-1 fallback, on the assumption it
+    reproduced pre-existing behavior harmlessly — but it doesn't scale down
+    gracefully, it hangs: reproduced against a real 19,706-node/23,177-edge
+    graphify export, the browser tab never became responsive again within
+    100+ seconds of the page's `load` event firing. A grid carries none of
+    spring_layout's topology-aware clustering (nodes don't group visually by
+    community/connectivity — see the graph.html docstring's Performance note
+    for the tradeoff), but it's O(n), so the page loads in seconds and the
+    filters panel stays fully usable, which is what actually matters once a
+    graph is this large: finding and filtering specific nodes, not eyeballing
+    an organic layout of tens of thousands of dots.
+    """
+    import math
+    nodes = list(G.nodes())
+    n = len(nodes)
+    cols = max(1, math.ceil(math.sqrt(n)))
+    span = max(cols - 1, 1)
+    positions = {}
+    for i, node in enumerate(nodes):
+        row, col = divmod(i, cols)
+        positions[node] = ((col / span) * 2 - 1, (row / span) * 2 - 1)
+    return positions
 
 
 def _precompute_layout(G: nx.Graph) -> dict | None:
@@ -40,24 +67,27 @@ def _precompute_layout(G: nx.Graph) -> dict | None:
 
     Letting vis-network run its ForceAtlas2 physics simulation client-side
     from a random start is the dominant cost on first paint for any graph
-    with more than a couple thousand nodes. Precomputing positions here and
-    shipping them in the node data lets the browser skip physics entirely
-    (see the HAS_LAYOUT flag in `_html_script()`).
+    with more than a couple thousand nodes — and past roughly `_LAYOUT_MAX_NODES`
+    it doesn't just cost more, it hangs the tab outright (see `_grid_layout`).
+    Precomputing positions here and shipping them in the node data lets the
+    browser skip physics entirely (see the HAS_LAYOUT flag in `_html_script()`).
 
-    Returns None (and the browser falls back to running physics as before —
-    not a regression) when the graph is empty, above `_LAYOUT_MAX_NODES`
-    (see its comment for why that cap exists), or when layout computation
-    raises for any other reason (missing scipy, a degenerate/disconnected
-    graph shape, etc.) — deliberately broad, since a failure here should
-    never be able to break `graphify update`/`export html` itself.
+    Prefers the organic spring_layout up to `_LAYOUT_MAX_NODES` nodes, falls
+    back to the cheap `_grid_layout` above that (or if spring_layout itself
+    raises — e.g. missing scipy, a degenerate/disconnected graph shape).
+    Returns None only for an empty graph, in which case there's nothing to
+    lay out and the (harmless, since there are no nodes) physics-driven JS
+    path runs instead.
     """
     n = G.number_of_nodes()
-    if n == 0 or n > _LAYOUT_MAX_NODES:
+    if n == 0:
         return None
-    try:
-        return nx.spring_layout(G, seed=42)
-    except Exception:
-        return None
+    if n <= _LAYOUT_MAX_NODES:
+        try:
+            return nx.spring_layout(G, seed=42)
+        except Exception:
+            pass
+    return _grid_layout(G)
 
 
 def _hub_alpha(base: float, hub_degree: int) -> float:
@@ -224,9 +254,11 @@ function esc(s) {{
 // Server-precomputed layout (see _precompute_layout() in html.py): when every
 // node carries x/y, skip vis-network's client-side ForceAtlas2 physics
 // entirely instead of re-simulating from a random start on every page load —
-// this is the dominant cost on first paint for large graphs. Falls back to
-// the old physics-driven behavior (HAS_LAYOUT = false) whenever the export
-// skipped precompute (empty graph, or above _LAYOUT_MAX_NODES).
+// this is the dominant cost on first paint for large graphs, and past a few
+// thousand nodes it doesn't just cost more, it hangs the tab outright (a
+// grid layout is the fallback there, not physics — see _grid_layout() in
+// html.py). HAS_LAYOUT is only ever false for an empty graph, where there
+// are no nodes for physics to hang on anyway.
 const HAS_LAYOUT = RAW_NODES.length > 0 && RAW_NODES.every(n => typeof n.x === 'number' && typeof n.y === 'number');
 
 // Build vis datasets
@@ -772,14 +804,20 @@ def to_html(
     visible/total counts per facet value. Raises ValueError if graph exceeds
     MAX_NODES_FOR_VIZ.
 
-    Performance: node positions are precomputed server-side when feasible
-    (`_precompute_layout`) so the browser can skip its ForceAtlas2 physics
-    simulation entirely instead of re-running it from scratch on every page
-    load; edges touching high-degree hub nodes get their opacity dampened
-    (`_hub_alpha`) to reduce visual overdraw; and the client-side filter
-    panel updates the vis.js DataSets incrementally (only nodes/edges whose
-    visibility actually changed) with a debounced text filter, keeping
-    interaction responsive on graphs with thousands of nodes.
+    Performance: node positions are always precomputed server-side
+    (`_precompute_layout`) so the browser never runs its ForceAtlas2 physics
+    simulation, which — past roughly a couple thousand nodes — doesn't just
+    cost more, it hangs the tab outright (confirmed against a real ~20k-node
+    export). Up to `_LAYOUT_MAX_NODES` this is an organic spring_layout;
+    above it, a cheap O(n) grid (`_grid_layout`) that carries no topological
+    meaning (nodes don't cluster visually by community) but keeps the page
+    loading in seconds and the filters panel fully usable — which is what
+    matters once a graph is too large to eyeball anyway. Edges touching
+    high-degree hub nodes get their opacity dampened (`_hub_alpha`) to
+    reduce visual overdraw; and the client-side filter panel updates the
+    vis.js DataSets incrementally (only nodes/edges whose visibility
+    actually changed) with a debounced text filter, keeping interaction
+    responsive on graphs with thousands of nodes.
 
     If member_counts is provided (aggregated community view), node sizes are
     based on community member counts rather than graph degree.
