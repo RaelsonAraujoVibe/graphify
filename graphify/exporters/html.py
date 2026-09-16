@@ -167,7 +167,7 @@ const nodesDS = new vis.DataSet(RAW_NODES.map(n => ({{
   id: n.id, label: n.label, color: n.color, size: n.size,
   font: n.font, title: n.title,
   _community: n.community, _community_name: n.community_name,
-  _source_file: n.source_file, _file_type: n.file_type, _degree: n.degree,
+  _source_file: n.source_file, _file_type: n.file_type, _kind: n.kind, _degree: n.degree,
 }})));
 
 const edgesDS = new vis.DataSet(RAW_EDGES.map((e, i) => ({{
@@ -222,6 +222,7 @@ function showInfo(nodeId) {{
   document.getElementById('info-content').innerHTML = `
     <div class="field"><b>${{esc(n.label)}}</b></div>
     <div class="field">Type: ${{esc(n._file_type || 'unknown')}}</div>
+    ${{n._kind ? `<div class="field">Subtipo: ${{esc(kindLabel(n._kind))}}</div>` : ''}}
     <div class="field">Community: ${{esc(n._community_name)}}</div>
     <div class="field">Source: ${{esc(n._source_file || '-')}}</div>
     <div class="field">Degree: ${{n._degree}}</div>
@@ -348,11 +349,52 @@ function facetItemsFrom(counts, emptyLabel) {{
     .sort((a, b) => b.total - a.total);
 }}
 
+// Friendly pt-BR labels for the granular `metadata.kind` values populated by
+// the VB6 extractor (graphify/extractors/vb6.py). Other extractors (notably
+// sql.py) do not populate this field today, so their nodes simply fall back
+// to '(sem subtipo)' — this facet is VB6-only for now, deliberately, since
+// tree-sitter-sql cannot yet structurally classify this codebase's T-SQL
+// dialect (see extractor code comments / GRAPH_REPORT for details).
+const KIND_LABELS = {{
+  file: 'Arquivo',
+  project: 'Projeto VB6',
+  external_reference: 'Referência externa',
+  interface_reference: 'Implements (interface)',
+  class: 'Classe VB6',
+  form: 'Form VB6',
+  module: 'Módulo VB6',
+  sub: 'Sub',
+  function: 'Function',
+  'property get': 'Property Get',
+  'property let': 'Property Let',
+  'property set': 'Property Set',
+  declare: 'Declare (API externa)',
+  type: 'Type (estrutura)',
+  enum: 'Enum',
+  event: 'Event',
+  const: 'Constante',
+  field: 'Campo',
+  variable: 'Variável',
+}};
+function kindLabel(v) {{
+  return KIND_LABELS[v] || v;
+}}
+function facetItemsFromKind(counts) {{
+  return [...counts.entries()]
+    .map(([value, total]) => ({{ value, label: value ? kindLabel(value) : '(sem subtipo)', total }}))
+    .sort((a, b) => b.total - a.total);
+}}
+
 const FACETS = [
   {{
     key: 'fileType', title: 'Node type', appliesTo: 'node',
     items: facetItemsFrom(distinctCounts(RAW_NODES.map(n => n.file_type)), '(unknown)'),
     read: n => n.file_type == null ? '' : String(n.file_type),
+  }},
+  {{
+    key: 'kind', title: 'Subtipo (VB6)', appliesTo: 'node',
+    items: facetItemsFromKind(distinctCounts(RAW_NODES.map(n => n.kind))),
+    read: n => n.kind == null ? '' : String(n.kind),
   }},
   {{
     key: 'community', title: 'Community', appliesTo: 'node',
@@ -729,6 +771,7 @@ def to_html(
             "community_name": sanitize_label((community_labels or {}).get(cid, f"Community {cid}")),
             "source_file": sanitize_label(str(data.get("source_file") or "")),
             "file_type": data.get("file_type", ""),
+            "kind": sanitize_label(str((data.get("metadata") or {}).get("kind", "") or "")),
             "degree": deg,
         }
         # Conditional learning fields — only present for annotated nodes, so
