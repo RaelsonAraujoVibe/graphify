@@ -102,7 +102,17 @@ def _radial_layout(G: nx.Graph) -> dict:
     if n == 0:
         return {}
     degree = dict(G.degree())
-    connected = [nd for nd in nodes if degree.get(nd, 0) > 0]
+    # Highest-degree nodes get the smallest spiral indices — and therefore
+    # the smallest radii, closest to center — so the result reads as a
+    # hub-centric cluster the way spring_layout's spring pull naturally
+    # produces (well-connected nodes get tugged toward the center of mass),
+    # rather than an arbitrary ring wherever hubs happened to fall in the
+    # graph's iteration order. This also gives the zoomed-out LOD level in
+    # `_html_script()` a coherent overview instead of a scattered sample.
+    connected = sorted(
+        (nd for nd in nodes if degree.get(nd, 0) > 0),
+        key=lambda nd: -degree.get(nd, 0),
+    )
     isolated = [nd for nd in nodes if degree.get(nd, 0) == 0]
 
     cell = _MAX_NODE_RADIUS * 2.25  # diameter + a small margin, canvas px
@@ -559,12 +569,20 @@ const network = new vis.Network(container, {{ nodes: nodesDS, edges: edgesDS }},
   edges: {{ smooth: {{ type: 'continuous', roundness: 0.2 }}, selectionWidth: 3 }},
 }});
 
+// Captured once, right after the camera first shows the whole graph — the
+// LOD block below (after Camada 4's activeNodeArray() is defined) uses this
+// as its zoom-level baseline, so its thresholds scale to however zoomed-out
+// "see everything" actually is for this particular graph/layout instead of
+// hardcoding an absolute vis-network scale number.
+let lodInitialScale = 1;
+
 if (HAS_LAYOUT) {{
   // Physics never runs, so nothing else fits the camera to the precomputed
   // positions — do it once explicitly (mirrors what stabilization: {{fit: true}}
   // gives the physics-driven path below). Positions are already known at
   // construction time, so this can happen immediately, no event wait needed.
   network.fit({{ animation: false }});
+  lodInitialScale = network.getScale();
 }} else {{
   network.once('stabilizationIterationsDone', () => {{
     network.setOptions({{ physics: {{ enabled: false }} }});
@@ -695,10 +713,12 @@ function expandCommunity(cid) {{
   expandedCommunities.add(cid);
 
   refreshDrilldownEdges();
+  recomputeLod();
   prevVisibleNodes = null;
   prevVisibleEdges = null;
   refresh();
   updateDrilldownStatus();
+  updateLodStatus();
 }}
 
 function collapseCommunity(cid) {{
@@ -720,10 +740,12 @@ function collapseCommunity(cid) {{
   }}
 
   refreshDrilldownEdges();
+  recomputeLod();
   prevVisibleNodes = null;
   prevVisibleEdges = null;
   refresh();
   updateDrilldownStatus();
+  updateLodStatus();
 }}
 
 network.on('doubleClick', params => {{
@@ -760,6 +782,119 @@ function showDrilldownWarning(msg) {{
   if (_drilldownWarningTimer) clearTimeout(_drilldownWarningTimer);
   _drilldownWarningTimer = setTimeout(() => {{ el.style.display = 'none'; }}, 6000);
 }}
+
+// ---------------------------------------------------------------------
+// Level of detail (LOD): a no-op below LOD_ACTIVATION_THRESHOLD active
+// nodes — small/typical graphs render exactly as before. Above it (the
+// scenario profiled directly: a 19,706-node/23,177-edge real export),
+// network.redraw() cost was measured at ~1s with every edge visible vs
+// ~700ms with zero edges — most of even the *edgeless* cost is drawing
+// tens of thousands of node circles every frame, which vis-network has no
+// built-in way to bound (it always redraws everything not `hidden`, with
+// no automatic viewport culling the way a WebGL renderer would have).
+//
+// Three zoom-driven levels, ported from grafo-explorer's own
+// nivelDeDetalhe system, progressively relax what's drawn:
+//   - zoomed all the way out ("mapa"): only high-degree hub nodes, no
+//     edges at all — a coarse map of the graph's structure, not a hairball.
+//   - a middle zoom ("bairro"): nodes within the current viewport (+ a
+//     margin so a small pan doesn't require an immediate recompute) above
+//     a moderate degree floor; edges touching the very highest-degree hubs
+//     are still suppressed, since a hub's fan-out is most of any large
+//     graph's edge count and the single biggest render cost.
+//   - zoomed in close ("rua"): full detail, but still only for whatever
+//     node/edge actually falls in the current viewport — this is what
+//     bounds render cost independent of total graph size once zoomed in,
+//     the piece plain hidden-flag toggling can't give on its own.
+//
+// Degree cutoffs are computed from percentiles of whatever's currently
+// active (not hardcoded absolute values), so they adapt to any graph size
+// rather than being tuned to one dataset.
+// ---------------------------------------------------------------------
+const LOD_ACTIVATION_THRESHOLD = 2000;
+let lodNodeIds = null;       // null = LOD inactive; every active node eligible
+let lodEdgesEnabled = true;  // the "mapa" level disables edges outright
+let lodHiddenHubIds = null;  // edges touching these ids are suppressed even when lodEdgesEnabled
+
+function lodActive() {{
+  return activeNodeArray().length > LOD_ACTIVATION_THRESHOLD;
+}}
+
+function lodDegreeThresholds(nodeArr) {{
+  const degs = nodeArr.map(n => n.degree || 0).slice().sort((a, b) => a - b);
+  const pct = p => degs.length ? degs[Math.min(degs.length - 1, Math.floor(p * (degs.length - 1)))] : 0;
+  return {{ hub: pct(0.98), mid: pct(0.85), hubSuppress: pct(0.995) }};
+}}
+
+function lodViewportRect(marginFactor) {{
+  const w = container.clientWidth, h = container.clientHeight;
+  const topLeft = network.DOMtoCanvas({{ x: 0, y: 0 }});
+  const bottomRight = network.DOMtoCanvas({{ x: w, y: h }});
+  const mx = (bottomRight.x - topLeft.x) * (marginFactor - 1) / 2;
+  const my = (bottomRight.y - topLeft.y) * (marginFactor - 1) / 2;
+  return {{ minX: topLeft.x - mx, maxX: bottomRight.x + mx, minY: topLeft.y - my, maxY: bottomRight.y + my }};
+}}
+
+function recomputeLod() {{
+  if (!lodActive()) {{
+    lodNodeIds = null;
+    lodEdgesEnabled = true;
+    lodHiddenHubIds = null;
+    return;
+  }}
+  const nodeArr = activeNodeArray();
+  const scale = network.getScale();
+  const th = lodDegreeThresholds(nodeArr);
+
+  if (scale < lodInitialScale * 3) {{
+    lodNodeIds = new Set(nodeArr.filter(n => (n.degree || 0) >= th.hub).map(n => n.id));
+    lodEdgesEnabled = false;
+    lodHiddenHubIds = null;
+  }} else if (scale < lodInitialScale * 10) {{
+    const rect = lodViewportRect(1.4);
+    lodNodeIds = new Set(nodeArr.filter(n =>
+      (n.degree || 0) >= th.mid &&
+      n.x >= rect.minX && n.x <= rect.maxX && n.y >= rect.minY && n.y <= rect.maxY
+    ).map(n => n.id));
+    lodEdgesEnabled = true;
+    lodHiddenHubIds = new Set(nodeArr.filter(n => (n.degree || 0) >= th.hubSuppress).map(n => n.id));
+  }} else {{
+    const rect = lodViewportRect(1.2);
+    lodNodeIds = new Set(nodeArr.filter(n =>
+      n.x >= rect.minX && n.x <= rect.maxX && n.y >= rect.minY && n.y <= rect.maxY
+    ).map(n => n.id));
+    lodEdgesEnabled = true;
+    lodHiddenHubIds = null;
+  }}
+}}
+
+const lodStatusEl = document.getElementById('lod-status');
+function updateLodStatus() {{
+  if (!lodStatusEl) return;
+  if (!lodActive()) {{ lodStatusEl.style.display = 'none'; return; }}
+  lodStatusEl.style.display = 'block';
+  const total = activeNodeArray().length;
+  const shown = lodNodeIds ? lodNodeIds.size : total;
+  lodStatusEl.textContent = `Grafo grande: mostrando ${{fmt(shown)}} de ${{fmt(total)}} nós — zoom/pan para ver mais`;
+}}
+
+let lodDebounce = null;
+function scheduleLodRecompute() {{
+  if (!lodActive() && lodNodeIds === null) return; // never activated, nothing to do
+  if (lodDebounce) clearTimeout(lodDebounce);
+  lodDebounce = setTimeout(() => {{
+    recomputeLod();
+    prevVisibleNodes = null;
+    prevVisibleEdges = null;
+    refresh();
+    updateLodStatus();
+  }}, 180);
+}}
+network.on('zoom', scheduleLodRecompute);
+network.on('dragEnd', scheduleLodRecompute);
+
+recomputeLod();
+updateLodStatus();
 
 function showInfo(nodeId) {{
   const n = nodesDS.get(nodeId);
@@ -993,7 +1128,9 @@ function nodeMatchesFilters(n) {{
 function computeVisible() {{
   const visibleNodes = new Set();
   activeNodeArray().forEach(n => {{
-    if (nodeMatchesFilters(n)) visibleNodes.add(n.id);
+    if (!nodeMatchesFilters(n)) return;
+    if (lodNodeIds !== null && !lodNodeIds.has(n.id)) return;
+    visibleNodes.add(n.id);
   }});
 
   const visibleEdges = new Set();
@@ -1004,6 +1141,10 @@ function computeVisible() {{
       if (!filters.active[f.key].has(f.read(e))) return;
     }}
     if (!visibleNodes.has(e.from) || !visibleNodes.has(e.to)) return;
+    if (lodNodeIds !== null) {{
+      if (!lodEdgesEnabled) return;
+      if (lodHiddenHubIds && (lodHiddenHubIds.has(e.from) || lodHiddenHubIds.has(e.to))) return;
+    }}
     visibleEdges.add(e._id);
     connected.add(e.from);
     connected.add(e.to);
@@ -1296,6 +1437,17 @@ def to_html(
     actually changed) with a debounced text filter, keeping interaction
     responsive on graphs with thousands of nodes.
 
+    Above a client-side node-count threshold, a zoom-driven level-of-detail
+    system (ported from grafo-explorer's own approach) additionally bounds
+    what's actually drawn each frame: zoomed all the way out only
+    high-degree hub nodes are shown with no edges at all; a middle zoom adds
+    a viewport-bounded, moderate-degree set of nodes with hub-touching edges
+    still suppressed; zoomed in close shows full detail but only for
+    whatever's in the current viewport. This exists because even with every
+    edge hidden, redrawing tens of thousands of node circles every frame has
+    a real cost vis-network's hidden-flag toggling alone doesn't bound —
+    profiled directly against a real ~20k-node export.
+
     If member_counts is provided (aggregated community view), node sizes are
     based on community member counts rather than graph degree.
 
@@ -1488,6 +1640,7 @@ def to_html(
       <div id="drilldown-warning" style="display:none;color:#f59e0b;font-size:11px;line-height:1.4;"></div>
     </div>
   </div>
+  <div id="lod-status" style="display:none;padding:8px 14px;font-size:11px;color:#93c5fd;background:#16213e;border-top:1px solid #2a2a4e;line-height:1.4;"></div>
   <div id="stats">{stats}</div>
 </div>
 {_html_script(nodes_json, edges_json, legend_json, full_nodes_json, full_edges_json, _DRILLDOWN_NODE_CAP)}
