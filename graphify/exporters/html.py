@@ -369,6 +369,13 @@ def _html_styles() -> str:
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: #0f0f1a; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; display: flex; height: 100vh; overflow: hidden; }
   #graph { flex: 1; }
+  /* vis-network takes ownership of #graph's innerHTML on construction (wipes
+     anything already inside it), so this can't be a child of #graph - it's a
+     sibling instead, fixed-positioned to overlay the same area (viewport
+     minus the fixed 280px sidebar). */
+  #empty-state { position: fixed; top: 0; left: 0; right: 280px; bottom: 0; display: none; align-items: center; justify-content: center; pointer-events: none; text-align: center; padding: 32px; }
+  #empty-state span { color: #6a6a8e; font-size: 14px; line-height: 1.6; max-width: 360px; }
+  #empty-state b { color: #93c5fd; font-weight: 600; }
   #sidebar { width: 280px; background: #1a1a2e; border-left: 1px solid #2a2a4e; display: flex; flex-direction: column; overflow: hidden; }
   #search-wrap { padding: 12px; border-bottom: 1px solid #2a2a4e; }
   #search { width: 100%; background: #0f0f1a; border: 1px solid #3a3a5e; color: #e0e0e0; padding: 7px 10px; border-radius: 6px; font-size: 13px; outline: none; }
@@ -718,7 +725,6 @@ function expandCommunity(cid) {{
   prevVisibleEdges = null;
   refresh();
   updateDrilldownStatus();
-  updateLodStatus();
 }}
 
 function collapseCommunity(cid) {{
@@ -745,7 +751,6 @@ function collapseCommunity(cid) {{
   prevVisibleEdges = null;
   refresh();
   updateDrilldownStatus();
-  updateLodStatus();
 }}
 
 network.on('doubleClick', params => {{
@@ -915,15 +920,27 @@ function recomputeLod() {{
   lodAllowedEdgeIds = new Set(candidates.map(e => e._id));
 }}
 
+const emptyStateEl = document.getElementById('empty-state');
 const lodStatusEl = document.getElementById('lod-status');
-function updateLodStatus() {{
+// Takes the SAME visibleNodes/visibleEdges refresh() just computed (post
+// facet-filtering), not just the raw LOD candidate sets - otherwise this
+// banner can claim nodes/edges are "showing" that the facet panel has
+// actually filtered out (e.g. right after the graph opens with every facet
+// unchecked, or whenever a facet selection narrows the LOD-eligible set
+// further). Only called from refresh() itself, so it's always in sync with
+// whatever actually just got sent to the DataSets.
+function updateLodStatus(visibleNodes, visibleEdges) {{
   if (!lodStatusEl) return;
-  if (!lodActive()) {{ lodStatusEl.style.display = 'none'; return; }}
+  if (!lodActive() || !visibleNodes.size) {{ lodStatusEl.style.display = 'none'; return; }}
   lodStatusEl.style.display = 'block';
   const totalNodes = activeNodeArray().length;
-  const shownNodes = lodNodeIds ? lodNodeIds.size : totalNodes;
-  const shownEdges = lodAllowedEdgeIds ? lodAllowedEdgeIds.size : null;
-  const edgePart = shownEdges === null ? '' : `, ${{fmt(shownEdges)}}${{shownEdges >= LOD_EDGE_CAP ? '+' : ''}} arestas`;
+  const shownNodes = visibleNodes.size;
+  const shownEdges = visibleEdges.size;
+  // Whether LOD itself truncated at the cap (independent of anything facets
+  // then filtered back out) - that's what the "+" suffix should reflect, not
+  // whether the post-facet count happens to reach the cap.
+  const lodCapped = lodAllowedEdgeIds !== null && lodAllowedEdgeIds.size >= LOD_EDGE_CAP;
+  const edgePart = `, ${{fmt(shownEdges)}}${{lodCapped ? '+' : ''}} arestas`;
   lodStatusEl.textContent = `Grafo grande: mostrando ${{fmt(shownNodes)}} de ${{fmt(totalNodes)}} nós${{edgePart}} — zoom/pan para ver mais`;
 }}
 
@@ -936,14 +953,12 @@ function scheduleLodRecompute() {{
     prevVisibleNodes = null;
     prevVisibleEdges = null;
     refresh();
-    updateLodStatus();
   }}, 180);
 }}
 network.on('zoom', scheduleLodRecompute);
 network.on('dragEnd', scheduleLodRecompute);
 
 recomputeLod();
-updateLodStatus();
 
 function showInfo(nodeId) {{
   const n = nodesDS.get(nodeId);
@@ -1148,8 +1163,15 @@ const FACETS = [
   }},
 ];
 
+// Facets start with every checkbox OFF: the canvas opens empty and the
+// user opts in to what they want to see, rather than opening on the full
+// (possibly huge) graph and having to opt out. This is a second, orthogonal
+// lever from the zoom-driven LOD system above — LOD bounds render cost once
+// a large-enough subset IS selected, this bounds it by simply not selecting
+// anything until asked. Degree range and "hide isolated" are left at their
+// permissive defaults since they aren't part of this opt-in model.
 const filters = {{ text: '', degreeMin: 0, degreeMax: maxDegree, hideIsolated: false, active: {{}} }};
-FACETS.forEach(f => {{ filters.active[f.key] = new Set(f.items.map(it => it.value)); }});
+FACETS.forEach(f => {{ filters.active[f.key] = new Set(); }});
 
 function normalize(s) {{
   return String(s ?? '').toLowerCase();
@@ -1349,6 +1371,8 @@ function refresh() {{
   filtersBadge.textContent = String(active);
   filtersBadge.style.display = active > 0 ? 'inline-block' : 'none';
   document.getElementById('degree-range-label').textContent = `${{fmt(filters.degreeMin)}}–${{fmt(filters.degreeMax)}}`;
+  if (emptyStateEl) emptyStateEl.style.display = visibleNodes.size === 0 ? 'flex' : 'none';
+  updateLodStatus(visibleNodes, visibleEdges);
 }}
 
 renderFacetGroups();
@@ -1385,7 +1409,7 @@ document.getElementById('hide-isolated-cb').addEventListener('change', (e) => {{
   refresh();
 }});
 
-document.getElementById('filters-clear').addEventListener('click', () => {{
+document.getElementById('filters-show-all').addEventListener('click', () => {{
   filters.text = '';
   filters.degreeMin = 0;
   filters.degreeMax = maxDegree;
@@ -1395,6 +1419,16 @@ document.getElementById('filters-clear').addEventListener('click', () => {{
   degreeMinInput.value = 0;
   degreeMaxInput.value = maxDegree;
   document.getElementById('hide-isolated-cb').checked = false;
+  refresh();
+}});
+
+// Mirror of "Show all": returns to the initial opt-in state (every facet
+// checkbox off) without touching text/degree/hide-isolated, which aren't
+// part of that opt-in model. Lets the user start over after checking a few
+// boxes, without unchecking each facet group one at a time via its "none"
+// link.
+document.getElementById('filters-hide-all').addEventListener('click', () => {{
+  FACETS.forEach(f => {{ filters.active[f.key] = new Set(); }});
   refresh();
 }});
 
@@ -1654,6 +1688,7 @@ def to_html(
 </head>
 <body>
 <div id="graph"></div>
+<div id="empty-state"><span>Nenhum nó selecionado.<br>Marque ao menos um item em <b>Node type</b>, <b>Subtipo</b> e <b>Community</b> na barra lateral (os três ao mesmo tempo) para começar a explorar o grafo — ou clique em <b>Show all</b> para ver tudo de uma vez.</span></div>
 <div id="sidebar">
   <div id="search-wrap">
     <input id="search" type="text" placeholder="Search nodes..." autocomplete="off">
@@ -1666,7 +1701,9 @@ def to_html(
   <div id="filters-wrap">
     <div class="filters-header">
       <h3>Filters <span id="filters-badge" class="filters-badge">0</span></h3>
-      <button type="button" id="filters-clear" class="filters-clear">Clear</button>
+      <span class="filters-header-actions">
+        <button type="button" id="filters-show-all" class="filters-clear">Show all</button>&middot;<button type="button" id="filters-hide-all" class="filters-clear">Hide all</button>
+      </span>
     </div>
     <div id="facet-text-wrap">
       <input id="facet-text" type="text" placeholder="Filter by name, file, community&hellip;" autocomplete="off">
